@@ -2,6 +2,7 @@ import { useEffect, useRef } from 'react';
 import L from 'leaflet';
 import { DEVICES, LINKS } from '../data/networkData';
 import { fetchRoute } from '../utils/fetchRoute';
+import Legend from './Legend';
 
 // Fix Leaflet's default icon path issue in bundlers
 delete L.Icon.Default.prototype._getIconUrl;
@@ -111,5 +112,11 @@ export default function NetworkMap() {
     };
   }, []); // empty dep array = run once on mount
 
-  return <div ref={mapRef} style={{ height: '100vh', width: '100%' }} />;
+  return (
+    <div className='relative'>
+        <div ref={mapRef} style={{ height: '100vh', width: '100%' }} />
+        <Legend/>
+    </div>
+
+  )
 }
