@@ -4,6 +4,7 @@ import { DEVICES, LINKS } from '../data/networkData';
 import { fetchRoute } from '../utils/fetchRoute';
 import Legend from './Legend';
 import {toGeoJSON} from '../utils/toGeoJSON';
+import { createMarker } from '../utils/createMarker';
 
 export default function NetworkMap() {
   const mapRef = useRef(null);
@@ -35,12 +36,7 @@ export default function NetworkMap() {
       }
 
       DEVICES.forEach(dev => {
-        const marker = new maplibregl.Marker({ draggable: true })
-          .setLngLat([dev.lng, dev.lat])
-          .addTo(map)
-        const popup = new maplibregl.Popup({ closeButton: false })
-        .setText(dev.name)
-        marker.setPopup(popup)
+        const marker = createMarker(dev).addTo(map)
 
         marker.on('drag', async () => {
           const lnglat = marker.getLngLat();
