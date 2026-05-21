@@ -1,23 +1,9 @@
 import { useEffect, useRef } from 'react';
-import L from 'leaflet';
+import maplibregl from 'maplibre-gl';
 import { DEVICES, LINKS } from '../data/networkData';
 import { fetchRoute } from '../utils/fetchRoute';
 import Legend from './Legend';
-
-// Fix Leaflet's default icon path issue in bundlers
-delete L.Icon.Default.prototype._getIconUrl;
-L.Icon.Default.mergeOptions({
-  iconRetinaUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon-2x.png',
-  iconUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon.png',
-  shadowUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-shadow.png',
-});
-
-const nodeIcon = L.divIcon({
-  html: `<div style="width:14px;height:14px;border-radius:50%;background:#fff;border:2px solid #888;cursor:grab;box-sizing:border-box;"></div>`,
-  className: '',
-  iconSize: [14, 14],
-  iconAnchor: [7, 7],
-});
+import {toGeoJSON} from '../utils/toGeoJSON';
 
 export default function NetworkMap() {
   const mapRef = useRef(null);
@@ -25,82 +11,81 @@ export default function NetworkMap() {
 
   useEffect(() => {
     if (mapInstanceRef.current) return;
+    
+    const map = new maplibregl.Map({
+        container: mapRef.current,
+        style: `https://api.maptiler.com/maps/streets/style.json?key=B2aWdlpiBBhi0n5jeueG`,
+        center: [90.4193, 23.7269], // Dhaka, Bangladesh
+        zoom: 11
+    });
 
-    const map = L.map(mapRef.current).fitBounds(
-      DEVICES.map(d => [d.lat, d.lng])
-    );
     mapInstanceRef.current = map;
 
-    L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
-      maxZoom: 19,
-      attribution: '&copy; <a href="http://openstreetmap.org/copyright">OpenStreetMap</a>',
-    }).addTo(map);
-
-    const pos = Object.fromEntries(
-      DEVICES.map(d => [d.id, { lat: d.lat, lng: d.lng }])
-    );
-
-    const lines = {};
-    LINKS.forEach(link => {
-      const dash =
-        link.type === 'copper'   ? '6 4'  :
-        link.type === 'wireless' ? '3 6'  : null;
-
-      lines[link.id] = L.polyline([], {
-        color: link.color,
-        weight: 3,
-        dashArray: dash,
-      })
-        .addTo(map)
-        .bindTooltip(`${link.from} → ${link.to} (${link.type})`);
-    });
-
-    async function rerouteFor(deviceId) {
-      const affected = LINKS.filter(
-        l => l.from === deviceId || l.to === deviceId
+    map.on('load', async () => {
+      const pos = Object.fromEntries(
+        DEVICES.map(d => [d.id, { lat: d.lat, lng: d.lng }])
       );
-      await Promise.all(
-        affected.map(async link => {
-          const coords = await fetchRoute(pos[link.from], pos[link.to]);
-          lines[link.id].setLatLngs(coords);
-        })
-      );
-    }
 
-    DEVICES.forEach(dev => {
-      const marker = L.marker([dev.lat, dev.lng], {
-        icon: nodeIcon,
-        draggable: true,
-      })
-        .addTo(map)
-        .bindTooltip(dev.name);
+      async function rerouteFor(deviceId) {
+        const affected = LINKS.filter(l => l.from === deviceId || l.to === deviceId);
+        await Promise.all(affected.map(async link => {
+            const coords = await fetchRoute(pos[link.from], pos[link.to]);
+            map.getSource(link.id).setData(toGeoJSON(coords));
+        }));
+      }
 
-      marker.on('drag', e => {
-        const { lat, lng } = e.latlng;
-        pos[dev.id] = { lat, lng };
+      DEVICES.forEach(dev => {
+        const marker = new maplibregl.Marker({ draggable: true })
+          .setLngLat([dev.lng, dev.lat])
+          .addTo(map)
+        const popup = new maplibregl.Popup({ closeButton: false })
+        .setText(dev.name)
+        marker.setPopup(popup)
 
-        LINKS.filter(l => l.from === dev.id || l.to === dev.id).forEach(link => {
-          lines[link.id].setLatLngs([
-            [pos[link.from].lat, pos[link.from].lng],
-            [pos[link.to].lat,   pos[link.to].lng],
-          ]);
+        marker.on('drag', async () => {
+          const lnglat = marker.getLngLat();
+          pos[dev.id] = { lat: lnglat.lat, lng: lnglat.lng };
+
+          LINKS.filter(l => l.from === dev.id || l.to === dev.id).forEach(link => {
+            map.getSource(link.id).setData(toGeoJSON([
+              [pos[link.from].lat, pos[link.from].lng],
+              [pos[link.to].lat,   pos[link.to].lng],
+            ]));
+          });
         });
+
+        marker.on('dragend', () => rerouteFor(dev.id));
       });
 
-      marker.on('dragend', () => rerouteFor(dev.id));
-    });
+      LINKS.forEach(link => {
+        map.addSource(link.id, {
+          type: 'geojson',
+          data: { type: 'Feature', geometry: { type: 'LineString', coordinates: [] } }
+        });
 
-    Promise.all(
-      LINKS.map(async link => {
-        const coords = await fetchRoute(pos[link.from], pos[link.to]);
-        lines[link.id].setLatLngs(coords);
-      })
-    );
+        const paint = {
+          'line-color': link.color,
+          'line-width': 3,
+        };
+        if (link.type === 'copper') paint['line-dasharray'] = [6, 4];
+        if (link.type === 'wireless') paint['line-dasharray'] = [3, 6];
+
+        map.addLayer({
+            id: link.id,
+            type: 'line',
+            source: link.id,
+            paint
+        });
+
+      });
+
+    });    
 
     return () => {
       map.remove();
       mapInstanceRef.current = null;
-    };
+    }
+        
   }, []);
 
   return (
