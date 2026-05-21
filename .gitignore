@@ -23,3 +23,6 @@ lerna-debug.log*
 ./backend/venv
 
 */venv/*
+
+#docs
+/docs
