@@ -15,7 +15,7 @@
 
 ## Overview
 
-Device Maps is a network topology visualisation dashboard. It renders network infrastructure (routers, switches, servers) as draggable map markers connected by road-routed links. The primary user is a NOC (Network Operations Centre) engineer who needs to monitor and understand network topology at a glance.
+Device Maps is a network topology visualisation dashboard. It renders network infrastructure (routers, switches, servers) as markers on a MapLibre map, connected by road-routed links. The primary user is a NOC (Network Operations Centre) engineer who needs to monitor and understand network topology at a glance.
 
 The system is split into two processes:
 
@@ -34,41 +34,101 @@ The map is initialised inside a `useEffect` with an empty dependency array, mean
 useEffect runs once
   → creates maplibregl.Map instance
   → stores in mapInstanceRef
+  → exposes window.__map, window.__linkIds, window.maplibregl (DEV only)
   → on 'load' event:
       → builds pos object (mutable device positions)
-      → defines rerouteFor() function
-      → adds markers for each device
-      → adds sources and layers for each link
+      → defines showMarkers() / hideMarkers()
+      → registers zoom event for hybrid switching
+      → defines rerouteFor()
+      → creates DOM markers, stores in markersRef
+      → adds link sources and layers
+      → loads icon sprites via loadDeviceIcons()
+      → adds devices GeoJSON source and symbol layer
+      → adds device and link hover tooltips
+      → calls hideMarkers() (starting zoom is 11, below threshold)
+      → fetches initial routes for all links
   → cleanup: map.remove() on unmount
 ```
 
 The guard `if (mapInstanceRef.current) return` prevents double-initialisation in React 18 StrictMode.
 
+### Hybrid Zoom Layer
+
+The map uses two rendering strategies depending on zoom level:
+
+| Zoom | Mode | Technology | Max devices |
+|---|---|---|---|
+| ≤ 13 | GeoJSON symbol layer | WebGL | 100,000+ |
+| > 13 | DOM markers | HTML/CSS | ~1,000 |
+
+**Why two modes?** DOM markers are draggable and support rich interactivity, but each is a separate DOM node. Browsers struggle past ~1,000 DOM elements. WebGL renders from a single GeoJSON source and can handle hundreds of thousands of points.
+
+The switch is triggered by `map.on('zoom')`:
+
+```js
+map.on('zoom', () => {
+    map.getZoom() > 13 ? showMarkers() : hideMarkers();
+});
+```
+
+`showMarkers()` adds DOM markers to the map and hides the symbol layer. `hideMarkers()` removes DOM markers and shows the symbol layer. DOM marker instances are stored in `markersRef` (a `useRef`) so they persist between zoom events without triggering re-renders.
+
+**Position sync:** When a marker is dragged at high zoom, `pos[dev.id]` is updated. On `dragend`, `rerouteFor()` also rebuilds the `devices` GeoJSON source from current `pos` values, so circles reflect the new position when zooming back out.
+
+### Icon Sprites (`iconSprite.js`)
+
+At low zoom, devices render as icon sprites registered with MapLibre via `map.addImage()`. Each icon is drawn onto an offscreen HTML `canvas`:
+
+```
+SVG string → HTMLImageElement → drawImage onto canvas → getImageData → map.addImage()
+```
+
+The canvas draws a coloured circle background first, then the Lucide icon SVG on top. Images are registered by device type name (`'router'`, `'server'`, etc.) and referenced in the symbol layer via `['get', 'type']`.
+
+Icons use the exact SVG paths from [lucide.dev](https://lucide.dev) to match the high-zoom DOM marker appearance.
+
 ### Why `useRef` not `useState`
 
-MapLibre is imperative — it manages its own DOM. Using `useState` would trigger React re-renders that fight Leaflet's internal DOM mutations. `useRef` provides a stable box that persists across renders without causing them.
+MapLibre is imperative — it manages its own DOM. Using `useState` would trigger React re-renders that conflict with MapLibre's internal state. `useRef` provides stable storage that persists across renders without triggering them. Three refs are used:
+
+- `mapRef` — the DOM div MapLibre renders into
+- `mapInstanceRef` — the MapLibre map instance
+- `markersRef` — array of DOM marker instances
 
 ### Sources and Layers
 
 Each link has a GeoJSON source and a line layer. The source holds coordinate data; the layer defines how to render it. This separation allows updating data (`source.setData()`) without recreating the layer.
 
 ```js
-// source: holds the data
 map.addSource(link.id, { type: 'geojson', data: emptyFeature });
-
-// layer: defines appearance
 map.addLayer({ id: link.id, type: 'line', source: link.id, paint: {...} });
+map.getSource(link.id).setData(toGeoJSON(coords));  // update data only
+```
 
-// update: swap data without touching the layer
-map.getSource(link.id).setData(toGeoJSON(coords));
+Devices use a single shared source (`'devices'`) with a symbol layer (`'devices-circles'`). The source is a `FeatureCollection` of all device points. Device type colours are applied via a MapLibre `match` expression:
+
+```js
+'circle-color': ['match', ['get', 'type'],
+    'core-router', '#ef4444',
+    'router', '#3b82f6',
+    // ...
+]
 ```
 
 ### Drag Behaviour
 
 Two events handle marker dragging:
 
-- `drag` — fires continuously while dragging. Updates `pos[dev.id]` and redraws connected links as straight lines for instant visual feedback. No network calls.
-- `dragend` — fires once on release. Calls `rerouteFor(deviceId)` which fetches real road routes from the backend for all affected links.
+- `drag` — fires continuously. Updates `pos[dev.id]` and redraws connected links as straight lines for instant visual feedback. No network calls.
+- `dragend` — fires once on release. Calls `rerouteFor(deviceId)` which fetches real road routes from the backend for all affected links, then rebuilds the devices GeoJSON source to sync circle positions.
+
+### Tooltips
+
+**Device tooltips (low zoom):** MapLibre mouse events on the symbol layer show a `Popup` with device name and type on hover.
+
+**Device tooltips (high zoom):** MapLibre `Popup` attached to each DOM marker via `marker.setPopup()`, shown on click.
+
+**Link tooltips:** MapLibre mouse events on each line layer show a `Popup` with `from → to` and link type on hover.
 
 ### GeoJSON Helper (`toGeoJSON.js`)
 
@@ -90,7 +150,7 @@ Note the coordinate flip — GeoJSON uses `[lng, lat]` (longitude first), opposi
 
 ### Custom Markers (`createMarker.jsx`)
 
-Each device type gets a custom SVG icon rendered inside a coloured circle. The marker element is a plain DOM `div` with inline styles and an SVG `innerHTML`. MapLibre receives this element via `{ element: el }` in the Marker constructor.
+Each device type gets a custom SVG icon rendered inside a coloured circle at high zoom. The marker element is a plain DOM `div` with inline styles and SVG `innerHTML`. MapLibre receives this element via `{ element: el }`.
 
 Tailwind classes are avoided on marker elements to prevent conflicts with MapLibre's CSS transformations.
 
@@ -105,6 +165,20 @@ const linkTypes = Object.values(
         return acc;
     }, {})
 );
+```
+
+### Device Colors (`networkData.js`)
+
+`DEVICE_COLORS` is the single source of truth for device type colours, imported by both `iconSprite.js` (low zoom WebGL) and `DeviceIcon.jsx` (high zoom DOM):
+
+```js
+export const DEVICE_COLORS = {
+  'core-router': '#ef4444',
+  'router':      '#3b82f6',
+  'switch':      '#f59e0b',
+  'edge-router': '#8b5cf6',
+  'server':      '#22c55e',
+};
 ```
 
 ---
@@ -231,24 +305,24 @@ _cache[key] = result            # store on success
 return result
 ```
 
-The cache key combines all four coordinate values. The same route requested from different directions (A→B vs B→A) produces different keys and separate cache entries — this is intentional since road routes are not always reversible.
+The cache key combines all four coordinate values. The same route requested from different directions (A→B vs B→A) produces different keys — intentional since road routes are not always reversible.
 
 **Limitations of in-memory cache:**
 - Lost on server restart
 - Not shared across multiple server instances
 - No eviction — grows unbounded over time
 
-**Production upgrade path:** Replace the dict with Redis. The interface is nearly identical (`get`/`set` vs dict access), and Redis survives restarts and scales horizontally.
+**Production upgrade path:** Replace the dict with Redis. The interface is nearly identical and Redis survives restarts and scales horizontally.
 
 ---
 
 ## Testing
 
+### Backend Tests (pytest)
+
 Tests use FastAPI's `TestClient` which sends requests directly to the app without a running server, making tests fast and reliable.
 
-### Route Sanity Tests
-
-Instead of hardcoding bounding boxes, tests compute a dynamic bounding box from the input points:
+**Route sanity tests** use a dynamic bounding box computed from input points:
 
 ```python
 min_lat = min(a["lat"], b["lat"]) - 1.0
@@ -257,15 +331,32 @@ min_lng = min(a["lng"], b["lng"]) - 1.0
 max_lng = max(a["lng"], b["lng"]) + 1.0
 ```
 
-This approach works for any coordinates worldwide — a test for Tokyo uses Tokyo's bounding box, not Dhaka's.
+This works for any coordinates worldwide — a test for Tokyo uses Tokyo's bounding box, not Dhaka's.
 
-### Cache Test
+**Cache test** mocks OSRM using `unittest.mock.patch` to replace `httpx.AsyncClient` with a fake returning a valid OSRM response. After two identical requests, `call_count == 1` proves OSRM was only called once. The mock must return `{"code": "Ok"}` so the cache storage branch is reached — `InvalidUrl` would hit the fallback, bypassing the cache.
 
-The cache test mocks OSRM using `unittest.mock.patch` to replace `httpx.AsyncClient` with a fake that returns a valid OSRM response. After two identical requests, `call_count == 1` proves OSRM was only called once.
+### Frontend Performance Tests (Playwright)
 
-The mock returns a valid `{"code": "Ok", "routes": [...]}` response so the cache storage branch is actually reached. Using `{"code": "InvalidUrl"}` would cause the fallback to run, bypassing the cache entirely.
+Playwright controls a real Chromium browser. Tests access the MapLibre map instance via `window.__map`, exposed in `NetworkMap.jsx` under `import.meta.env.DEV`.
 
-`_cache.clear()` is called at the start of the test to prevent pollution from earlier tests that may have already cached the same route.
+**WebGL render tests** inject N fake devices into the `devices` GeoJSON source and measure time until the next `render` event fires:
+
+```js
+map.getSource('devices').setData({ type: 'FeatureCollection', features });
+map.once('render', () => resolve(performance.now() - start));
+```
+
+**Route load test** polls all link sources until their coordinate arrays are non-empty, measuring total time from page navigation to all routes drawn.
+
+**DOM marker test** zooms to level 14, injects 10,000 markers via `maplibregl.Marker`, and measures time until the next animation frame.
+
+```
+Results (measured):
+  100 devices (WebGL):    26ms   / 100ms threshold
+  1,000 devices (WebGL):  18ms   / 200ms threshold
+  10,000 devices (WebGL): 85ms   / 500ms threshold
+  All routes on load:     1544ms / 8000ms threshold
+```
 
 ---
 
@@ -275,7 +366,7 @@ The mock returns a valid `{"code": "Ok", "routes": [...]}` response so the cache
 
 ```js
 {
-  id: string,       // unique identifier, used as cache key
+  id: string,       // unique identifier
   name: string,     // display name for tooltip
   lat: number,      // latitude
   lng: number,      // longitude
@@ -301,7 +392,17 @@ The mock returns a valid `{"code": "Ok", "routes": [...]}` response so the cache
 [[lat, lng], [lat, lng], ...]  # array of coordinate pairs
 ```
 
-### GeoJSON (MapLibre format)
+### GeoJSON Device Feature
+
+```json
+{
+  "type": "Feature",
+  "geometry": { "type": "Point", "coordinates": [lng, lat] },
+  "properties": { "id": "core-1", "type": "core-router", "name": "Core Router Alpha" }
+}
+```
+
+### GeoJSON Link Feature
 
 ```json
 {
@@ -318,19 +419,25 @@ The mock returns a valid `{"code": "Ok", "routes": [...]}` response so the cache
 ## Key Design Decisions
 
 **Why MapLibre over Leaflet?**
-MapLibre uses WebGL for rendering (faster, smoother at scale) and vector tiles (more data, better styling control). Leaflet uses raster tiles which are pre-rendered images — less flexible and heavier at scale.
+MapLibre uses WebGL for rendering (faster, smoother at scale) and vector tiles (more data, better styling control). Leaflet uses raster tiles — less flexible and heavier at scale. Performance tests confirm MapLibre renders 10,000 devices in 85ms.
+
+**Why the hybrid zoom approach?**
+DOM markers are draggable and support Lucide icons but break at scale. WebGL layers scale to 100,000+ devices but don't support native drag. Switching at zoom 13 (street level) gives NOC engineers a fast overview at low zoom and full interactivity when zoomed in to a specific area.
 
 **Why FastAPI over Express or Django?**
-FastAPI is async-native (important for concurrent OSRM calls), generates API docs automatically, and uses Python type hints for validation via Pydantic. Django is too heavy for a simple API layer; Express requires more manual validation setup.
+FastAPI is async-native (important for concurrent OSRM calls), generates API docs automatically, and uses Python type hints for validation via Pydantic. Django is too heavy for a simple API layer.
 
 **Why SQLite over PostgreSQL for auth?**
-SQLite requires zero configuration for development — no separate server process. The ORM (SQLAlchemy) abstracts the database, so switching to PostgreSQL for production requires changing one connection string.
+SQLite requires zero configuration for development. The ORM (SQLAlchemy) abstracts the database, so switching to PostgreSQL for production requires changing one connection string.
 
 **Why in-memory cache over Redis?**
 In-memory is zero-dependency and sufficient for a single-instance dev server. The cache interface is abstracted in `osrm.py` so swapping to Redis later is a localised change.
 
 **Why JWT over sessions?**
-JWTs are stateless — the server doesn't store session data. This makes horizontal scaling simpler (any server instance can validate any token) and fits the REST API model well.
+JWTs are stateless — the server doesn't store session data. This makes horizontal scaling simpler and fits the REST API model well.
 
 **Why `useRef` for the map instance?**
 MapLibre manages its own DOM imperatively. React's `useState` would cause re-renders that conflict with MapLibre's internal state. `useRef` provides stable storage that persists across renders without triggering them.
+
+**Why expose `window.__map` in DEV?**
+Playwright runs in a separate browser context from the React app. Exposing the map instance on `window` under `import.meta.env.DEV` lets performance tests access MapLibre directly without modifying production code.

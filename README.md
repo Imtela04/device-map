@@ -1,4 +1,4 @@
-# device-map# Device Maps
+# Device Maps
 
 A network topology dashboard for visualising and managing network devices and links on an interactive map. Built for NOC engineers to monitor infrastructure in real time.
 
@@ -6,7 +6,7 @@ A network topology dashboard for visualising and managing network devices and li
 
 ## What It Does
 
-Device Maps renders network devices as draggable markers on a MapLibre map, connected by road-routed links. Dragging a device re-routes its connected links via OSRM. The FastAPI backend handles routing requests, caches results, and serves a JWT-authenticated API.
+Device Maps renders network devices as draggable markers on a MapLibre map, connected by road-routed links. At low zoom, devices render as WebGL icon sprites for performance. At high zoom (> 13), they switch to draggable DOM markers with Lucide icons. Dragging a device re-routes its connected links via OSRM. The FastAPI backend handles routing requests, caches results, and serves a JWT-authenticated API.
 
 ---
 
@@ -37,7 +37,8 @@ SQLite (user auth)
 | Routing | OSRM | Free, self-hostable road routing engine |
 | Auth | JWT + bcrypt | Stateless tokens, industry standard |
 | Database | SQLite + SQLAlchemy | Zero-config for development |
-| Testing | pytest + TestClient | Fast, no live server needed |
+| Testing (backend) | pytest + TestClient | Fast, no live server needed |
+| Testing (frontend) | Playwright | Real browser automation and performance measurement |
 
 ---
 
@@ -48,15 +49,19 @@ device-maps/
 ├── network-map/                  # React frontend
 │   ├── src/
 │   │   ├── components/
-│   │   │   ├── NetworkMap.jsx    # Map initialisation, markers, links
+│   │   │   ├── NetworkMap.jsx    # Map initialisation, markers, links, zoom switching
 │   │   │   ├── Legend.jsx        # Link type legend overlay
-│   │   │   └── DeviceIcon.jsx    # Per-device-type icon component
+│   │   │   └── DeviceIcon.jsx    # Per-device-type Lucide icon component (high zoom)
 │   │   ├── data/
-│   │   │   └── networkData.js    # DEVICES and LINKS static data
+│   │   │   └── networkData.js    # DEVICES, LINKS, DEVICE_COLORS
 │   │   └── utils/
 │   │       ├── fetchRoute.js     # Calls backend /api/route
 │   │       ├── toGeoJSON.js      # Converts coord arrays to GeoJSON
-│   │       └── createMarker.js   # Creates custom MapLibre markers
+│   │       ├── createMarker.jsx  # Creates custom DOM markers (high zoom)
+│   │       └── iconSprite.js     # Registers WebGL icon sprites with MapLibre (low zoom)
+│   ├── tests/
+│   │   └── performance.spec.js  # Playwright performance tests
+│   ├── playwright.config.js
 │   └── index.css
 │
 └── backend/                      # FastAPI backend
@@ -170,12 +175,12 @@ The same route requested twice only calls OSRM once. Cache persists for the life
 
 ## Running Tests
 
+### Backend
+
 ```bash
 cd backend
 pytest tests/test_routes.py -v
 ```
-
-### Test coverage
 
 | Test | What it verifies |
 |---|---|
@@ -184,16 +189,43 @@ pytest tests/test_routes.py -v
 | `test_international` | Routing works for any coordinates worldwide |
 | `test_cache_hits_osrm_once` | OSRM called once for two identical requests |
 
+### Frontend Performance
+
+```bash
+cd network-map
+npx playwright test --headed
+```
+
+Requires both the Vite dev server and FastAPI backend to be running.
+
+| Test | Threshold | Actual |
+|---|---|---|
+| 100 devices (WebGL) | < 100ms | ~26ms |
+| 1,000 devices (WebGL) | < 200ms | ~18ms |
+| 10,000 devices (WebGL) | < 500ms | ~85ms |
+| 10,000 DOM markers | < 3000ms | measured |
+| All routes drawn on load | < 8000ms | ~1544ms |
+
 ---
 
 ## Device Types
 
-| Type | Colour |
-|---|---|
-| Core Router | Red `#ef4444` |
-| Router | Blue `#3b82f6` |
-| Switch | Amber `#f59e0b` |
-| Edge Router | Purple `#8b5cf6` |
-| Server | Green `#22c55e` |
+| Type | Icon | Colour |
+|---|---|---|
+| Core Router | Network | Red `#ef4444` |
+| Router | Router | Blue `#3b82f6` |
+| Switch | GitFork | Amber `#f59e0b` |
+| Edge Router | Radio | Purple `#8b5cf6` |
+| Server | Server | Green `#22c55e` |
 
 ---
+
+## Zoom Behaviour
+
+| Zoom | Rendering | Interaction |
+|---|---|---|
+| ≤ 13 | WebGL icon sprites (GeoJSON layer) | Hover tooltip |
+| > 13 | DOM markers with Lucide icons | Draggable, click tooltip |
+
+Switching zoom levels syncs device positions — dragging a marker at high zoom updates the low-zoom circle position when zoomed back out.
+
