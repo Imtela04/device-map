@@ -78,3 +78,36 @@ test('all routes drawn within 8000ms of page load', async ({ page }) => {
     console.log(`All routes drawn in ${duration}ms`);
     expect(duration).toBeLessThan(8000);
 });
+
+test('renders 50000 DOM markers within 3000ms', async ({ page }) => {
+    await page.goto('http://localhost:5173');
+    await waitForMap(page);
+
+    const duration = await page.evaluate(() => {
+        return new Promise(resolve => {
+            const map = window.__map;
+            
+            // zoom in past 13 to trigger DOM markers
+            map.setZoom(14);
+            
+            const start = performance.now();
+            
+            // inject 50000 devices as markers
+            const { Marker, Popup } = window.maplibregl;
+            Array.from({ length: 50000 }, (_, i) => {
+                const el = document.createElement('div');
+                el.style.cssText = 'width:32px;height:32px;border-radius:50%;background:#3b82f6;border:2px solid white;';
+                new Marker({ element: el })
+                    .setLngLat([90.4 + Math.random() * 0.5, 23.7 + Math.random() * 0.5])
+                    .addTo(map);
+            });
+
+            requestAnimationFrame(() => {
+                resolve(performance.now() - start);
+            });
+        });
+    });
+
+    console.log(`50000 DOM markers: ${duration.toFixed(2)}ms`);
+    expect(duration).toBeLessThan(3000);
+});

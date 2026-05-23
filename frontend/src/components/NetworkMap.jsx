@@ -26,6 +26,7 @@ export default function NetworkMap() {
     if (import.meta.env.DEV) {
         window.__map = map;
         window.__linkIds = LINKS.map(l => l.id);
+        window.maplibregl = maplibregl
     }
 
     map.on('load', async () => {
@@ -61,7 +62,7 @@ export default function NetworkMap() {
         map.setLayoutProperty('devices-circles', 'visibility', 'visible');
     }
     map.on('zoom', () => {
-      map.getZoom() > 13 ? showMarkers() : hideMarkers();
+      map.getZoom() > 13? showMarkers() : hideMarkers();
     });
 
     async function rerouteFor(deviceId) {
