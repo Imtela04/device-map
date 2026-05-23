@@ -14,3 +14,11 @@ export const LINKS = [
     { id:'l5', from:'core-1', to:'srv-1',   type:'copper',   color:'#f59e0b' },
     { id:'l6', from:'dist-2', to:'sw-1',    type:'wireless', color:'#22c55e' },
 ];
+
+export const DEVICE_COLORS = {
+  'core-router': '#ef4444',
+  'router':      '#3b82f6',
+  'switch':      '#f59e0b',
+  'edge-router': '#8b5cf6',
+  'server':      '#22c55e',
+};

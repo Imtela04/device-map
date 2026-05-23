@@ -1,11 +1,11 @@
 import { Router, Server, Network, GitFork, Radio } from 'lucide-react';
-
+import { DEVICE_COLORS } from '../data/networkData';
 const deviceConfig = {
-  'core-router': { icon: Network,     color: '#ef4444' },
-  'router':      { icon: Router,      color: '#3b82f6' },
-  'switch':      { icon: GitFork,     color: '#f59e0b' },
-  'edge-router': { icon: Radio,       color: '#8b5cf6' },
-  'server':      { icon: Server,      color: '#22c55e' },
+  'core-router': { icon: Network,     color:DEVICE_COLORS['core-router'] },
+  'router':      { icon: Router,      color:DEVICE_COLORS['router'] },
+  'switch':      { icon: GitFork,     color: DEVICE_COLORS['switch'] },
+  'edge-router': { icon: Radio,       color: DEVICE_COLORS['edge-router'] },
+  'server':      { icon: Server,      color: DEVICE_COLORS['server'] },
 };
 
 export default function DeviceIcon({ type }) {
