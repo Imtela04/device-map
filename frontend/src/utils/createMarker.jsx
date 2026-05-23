@@ -14,3 +14,4 @@ export function createMarker(dev) {
     marker.setPopup(popup)
     return marker;
 }
+
