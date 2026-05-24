@@ -246,9 +246,6 @@ export default function NetworkMap() {
     map.on('mouseleave', 'clusters-outer', () => { map.getCanvas().style.cursor = ''; });
 
 
-
-
-
     function updateLinksSource() {
         map.getSource('links').setData({
             type: 'FeatureCollection',
