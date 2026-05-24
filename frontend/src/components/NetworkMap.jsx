@@ -1,11 +1,11 @@
 import { useEffect, useRef } from 'react';
 import maplibregl from 'maplibre-gl';
-import { DEVICES, LINKS, DEVICE_COLORS } from '../data/networkData';
 import { fetchRoute } from '../utils/fetchRoute';
 import Legend from './Legend';
 import {toGeoJSON} from '../utils/toGeoJSON';
 import { createMarker } from '../utils/createMarker';
-import { loadDeviceIcons } from '../utils/iconSprite';
+import { DEVICE_COLORS } from '../data/networkData';
+
 
 export default function NetworkMap() {
   const mapRef              = useRef(null);
@@ -29,7 +29,7 @@ export default function NetworkMap() {
       fetch('http://localhost:8000/api/devices').then(r => r.json()),
       fetch('http://localhost:8000/api/links').then(r => r.json()),
     ]);
-    console.log(`Fetched ${devices.length} devices and ${links.length} links`);
+    // console.log(`Fetched ${devices.length} devices and ${links.length} links`);
 
 
     if (import.meta.env.DEV) {
@@ -57,48 +57,66 @@ export default function NetworkMap() {
       map.getCanvas().style.cursor = '';
       popup.remove();
     });
+
     const pos = Object.fromEntries(
       devices.map(d => [d.id, { lat: d.lat, lng: d.lng }])
     );
+    const linkCoords = {};
+    links.forEach(link => { linkCoords[link.id] = []; });
 
     function showMarkers() {
-      if (markersRef.current.length === 0) {
-        // get visible bounds
-        const bounds = map.getBounds();
-        const visible = devices.filter(dev =>
-          dev.lng >= bounds.getWest() && dev.lng <= bounds.getEast() &&
-          dev.lat >= bounds.getSouth() && dev.lat <= bounds.getNorth()
-        );
-        visible.forEach(dev => {
-          const marker = createMarker(dev);
-          markersRef.current.push(marker);
-          marker.addTo(map);
-          // drag events here
+      // always clear and recreate based on current bounds
+      markersRef.current.forEach(m => m.remove());
+      markersRef.current = [];
+
+      const bounds = map.getBounds();
+      const visible = devices.filter(dev =>
+        dev.lng >= bounds.getWest() && dev.lng <= bounds.getEast() &&
+        dev.lat >= bounds.getSouth() && dev.lat <= bounds.getNorth()
+      );
+
+      visible.forEach(dev => {
+        const marker = createMarker(dev);
+        markersRef.current.push(marker);
+        marker.addTo(map);
+
+        marker.on('drag', () => {
+          const lnglat = marker.getLngLat();
+          pos[dev.id] = { lat: lnglat.lat, lng: lnglat.lng };
+          links.filter(l => l.from === dev.id || l.to === dev.id).forEach(link => {
+            linkCoords[link.id] = [
+              [pos[link.from].lng, pos[link.from].lat],
+              [pos[link.to].lng,   pos[link.to].lat],
+            ];
+          });
+          updateLinksSource();
         });
-      } else {
-        markersRef.current.forEach(m => m.addTo(map));
-      }
+
+        marker.on('dragend', () => rerouteFor(dev.id));
+      });
+
+      map.setLayoutProperty('clusters', 'visibility', 'none');
+      map.setLayoutProperty('cluster-count', 'visibility', 'none');
       map.setLayoutProperty('devices-circles', 'visibility', 'none');
+      map.setLayoutProperty('clusters-outer', 'visibility', 'none');
     }
 
     function hideMarkers() {
-      markersRef.current.forEach(m => m.remove());
-      map.setLayoutProperty('devices-circles', 'visibility', 'visible');
+        markersRef.current.forEach(m => m.remove());
+        map.setLayoutProperty('clusters', 'visibility', 'visible');
+        map.setLayoutProperty('cluster-count', 'visibility', 'visible');
+        map.setLayoutProperty('devices-circles', 'visibility', 'visible');
+        map.setLayoutProperty('clusters-outer', 'visibility', 'visible');
     }
+
+
     async function rerouteFor(deviceId) {
-      const affected = links.filter(l => l.from === deviceId || l.to === deviceId);
-      await Promise.all(affected.map(async link => {
-        const coords = await fetchRoute(pos[link.from], pos[link.to]);
-        map.getSource(link.id).setData(toGeoJSON(coords));
-        map.getSource('devices').setData({
-          type: 'FeatureCollection',
-          features: devices.map(dev => ({
-            type: 'Feature',
-            geometry: { type: 'Point', coordinates: [pos[dev.id].lng, pos[dev.id].lat] },
-            properties: { id: dev.id, type: dev.type, name: dev.name }
-          }))
-        });
-      }));
+        const affected = links.filter(l => l.from === deviceId || l.to === deviceId);
+        await Promise.all(affected.map(async link => {
+            const coords = await fetchRoute(pos[link.from], pos[link.to]);
+            linkCoords[link.id] = coords.map(([lat, lng]) => [lng, lat]);
+        }));
+        updateLinksSource();
     }
 
     // single source for all links
@@ -127,54 +145,122 @@ export default function NetworkMap() {
         paint
       });
     });
-    await loadDeviceIcons(map);
+
+    // source with clustering enabled
     map.addSource('devices', {
-    type: 'geojson',
-    data: {
-      type: 'FeatureCollection',
-      features: devices.map(dev => ({
-        type: 'Feature',
-        geometry: { type: 'Point', coordinates: [dev.lng, dev.lat] },
-        properties: { id: dev.id, type: dev.type, name: dev.name }
-      }))
-    }
-      
-  
+      type: 'geojson',
+      cluster: true,
+      clusterMaxZoom: 12,
+      clusterRadius: 50,
+      data: {
+        type: 'FeatureCollection',
+        features: devices.map(dev => ({
+          type: 'Feature',
+          geometry: { type: 'Point', coordinates: [dev.lng, dev.lat] },
+          properties: { id: dev.id, type: dev.type, name: dev.name }
+        }))
+      }
     });
 
+    // cluster circles
+    // outer ring
     map.addLayer({
-      id: 'devices-circles',
+      id: 'clusters-outer',
       type: 'circle',
       source: 'devices',
+      filter: ['has', 'point_count'],
       paint: {
-          'circle-radius': 6,
-          'circle-color': ['match', ['get', 'type'],
-              'core-router', DEVICE_COLORS['core-router'],
-              'router',      DEVICE_COLORS['router'],
-              'switch',      DEVICE_COLORS['switch'],
-              'edge-router', DEVICE_COLORS['edge-router'],
-              'server',      DEVICE_COLORS['server'],
-              '#6b7280'
-          ],
-          'circle-stroke-width': 1,
-          'circle-stroke-color': '#ffffff'
+        'circle-color': [
+          'step', ['get', 'point_count'],
+          'rgba(34, 197, 94, 0.15)',
+          100, 'rgba(245, 158, 11, 0.15)',
+          1000, 'rgba(239, 68, 68, 0.15)'
+        ],
+        'circle-radius': [
+          'step', ['get', 'point_count'],
+          12, 100, 15, 1000, 18
+        ],
+        'circle-stroke-width': 1,
+        'circle-stroke-color': [
+          'step', ['get', 'point_count'],
+          'rgba(34, 197, 94, 0.4)',
+          100, 'rgba(245, 158, 11, 0.4)',
+          1000, 'rgba(239, 68, 68, 0.4)'
+        ]
       }
-  });
-  hideMarkers();
+    });
 
-  function updateLinksSource(updatedLinks) {
-  map.getSource('links').setData({
-    type: 'FeatureCollection',
-    features: updatedLinks.map(link => ({
-      type: 'Feature',
-      geometry: { type: 'LineString', coordinates: link.coords || [] },
-      properties: { id: link.id, from: link.from, to: link.to, type: link.type }
-    }))
-  });
-}
+    // inner filled circle
+    map.addLayer({
+      id: 'clusters',
+      type: 'circle',
+      source: 'devices',
+      filter: ['has', 'point_count'],
+      paint: {
+        'circle-color': [
+          'step', ['get', 'point_count'],
+          '#22c55e',
+          100, '#f59e0b',
+          1000, '#ef4444'
+        ],
+        'circle-radius': [
+          'step', ['get', 'point_count'],
+          9, 100, 12, 1000, 15
+        ],
+        'circle-stroke-width': 0
+      }
+    });
 
-  });  
-  
+    // count label
+    map.addLayer({
+      id: 'cluster-count',
+      type: 'symbol',
+      source: 'devices',
+      filter: ['has', 'point_count'],
+      layout: {
+        'text-field': '{point_count_abbreviated}',
+        'text-size': 11,
+        'text-font': ['Open Sans Bold', 'Arial Unicode MS Bold'],
+        'text-allow-overlap': true
+      },
+      paint: { 'text-color': '#ffffff' }
+    });
+    hideMarkers();
+
+    map.on('zoom', () => {
+      map.getZoom() >= 12 ? showMarkers() : hideMarkers();
+    });
+
+    map.on('moveend', () => {
+      if (map.getZoom() >= 13) showMarkers();
+    });
+
+    map.on('click', 'clusters', async (e) => {
+      const features = map.queryRenderedFeatures(e.point, { layers: ['clusters'] });
+      const clusterId = features[0].properties.cluster_id;
+      const zoom = await map.getSource('devices').getClusterExpansionZoom(clusterId);
+      map.easeTo({ center: features[0].geometry.coordinates, zoom });
+    });
+
+    map.on('mouseenter', 'clusters-outer', () => { map.getCanvas().style.cursor = 'pointer'; });
+    map.on('mouseleave', 'clusters-outer', () => { map.getCanvas().style.cursor = ''; });
+
+
+
+
+
+    function updateLinksSource() {
+        map.getSource('links').setData({
+            type: 'FeatureCollection',
+            features: links.map(link => ({
+                type: 'Feature',
+                geometry: { type: 'LineString', coordinates: linkCoords[link.id] || [] },
+                properties: { id: link.id, from: link.from, to: link.to, type: link.type }
+            }))
+        });
+    }
+    });  
+    
 
     return () => {
       map.remove();
