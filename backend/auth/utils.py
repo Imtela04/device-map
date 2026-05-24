@@ -3,7 +3,8 @@ from jose import jwt, JWTError
 from datetime import datetime, timezone, timedelta
 
 pwd_context = CryptContext(schemes=["bcrypt"])
-SECRET_KEY = "your-secret-key-here"
+import os
+SECRET_KEY = os.environ.get("SECRET_KEY", "dev-insecure-key-change-me")
 ALGORITHM = "HS256"
 EXPIRY_MINUTES = 30
 

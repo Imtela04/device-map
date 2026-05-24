@@ -10,7 +10,7 @@ import { DEVICE_COLORS } from '../data/networkData';
 export default function NetworkMap() {
   const mapRef              = useRef(null);
   const mapInstanceRef      = useRef(null);
-  const markersRef          = useRef([]);
+  const markersRef          = useRef(new Map());
 
   useEffect(() => {
     if (mapInstanceRef.current) return;
@@ -65,35 +65,50 @@ export default function NetworkMap() {
     links.forEach(link => { linkCoords[link.id] = []; });
 
     function showMarkers() {
-      // always clear and recreate based on current bounds
       markersRef.current.forEach(m => m.remove());
       markersRef.current = [];
 
       const bounds = map.getBounds();
-      const visible = devices.filter(dev =>
-        dev.lng >= bounds.getWest() && dev.lng <= bounds.getEast() &&
-        dev.lat >= bounds.getSouth() && dev.lat <= bounds.getNorth()
-      );
-
-      visible.forEach(dev => {
-        const marker = createMarker(dev);
-        markersRef.current.push(marker);
-        marker.addTo(map);
+      devices
+        .filter(dev =>
+          pos[dev.id].lng >= bounds.getWest() && pos[dev.id].lng <= bounds.getEast() &&
+          pos[dev.id].lat >= bounds.getSouth() && pos[dev.id].lat <= bounds.getNorth()
+        )
+        .forEach(dev => {
+          const marker = createMarker({ ...dev, lat: pos[dev.id].lat, lng: pos[dev.id].lng });
+          markersRef.current.push(marker);
+          marker.addTo(map);
 
         marker.on('drag', () => {
           const lnglat = marker.getLngLat();
           pos[dev.id] = { lat: lnglat.lat, lng: lnglat.lng };
-          links.filter(l => l.from === dev.id || l.to === dev.id).forEach(link => {
-            linkCoords[link.id] = [
-              [pos[link.from].lng, pos[link.from].lat],
-              [pos[link.to].lng,   pos[link.to].lat],
-            ];
+
+          // Straight-line preview only — skip full rebuild
+          const preview = links
+            .filter(l => l.from === dev.id || l.to === dev.id)
+            .map(link => ({
+              type: 'Feature',
+              geometry: { type: 'LineString', coordinates: [
+                [pos[link.from].lng, pos[link.from].lat],
+                [pos[link.to].lng,   pos[link.to].lat],
+              ]},
+              properties: { id: link.id, from: link.from, to: link.to, type: link.type }
+            }));
+
+          // Merge preview into full source without touching unaffected links
+          const affected = new Set(links.filter(l => l.from === dev.id || l.to === dev.id).map(l => l.id));
+          map.getSource('links').setData({
+            type: 'FeatureCollection',
+            features: links.map(link =>
+              affected.has(link.id)
+                ? preview.find(p => p.properties.id === link.id)
+                : { type: 'Feature', geometry: { type: 'LineString', coordinates: linkCoords[link.id] || [] }, properties: { id: link.id, from: link.from, to: link.to, type: link.type } }
+            )
           });
-          updateLinksSource();
         });
 
-        marker.on('dragend', () => rerouteFor(dev.id));
-      });
+          marker.on('dragend', () => rerouteFor(dev.id));
+        });
 
       map.setLayoutProperty('clusters', 'visibility', 'none');
       map.setLayoutProperty('cluster-count', 'visibility', 'none');
@@ -102,22 +117,23 @@ export default function NetworkMap() {
     }
 
     function hideMarkers() {
-        markersRef.current.forEach(m => m.remove());
-        map.setLayoutProperty('clusters', 'visibility', 'visible');
-        map.setLayoutProperty('cluster-count', 'visibility', 'visible');
-        map.setLayoutProperty('devices-circles', 'visibility', 'visible');
-        map.setLayoutProperty('clusters-outer', 'visibility', 'visible');
+      markersRef.current.forEach(m => m.remove());
+      markersRef.current = [];
+      map.setLayoutProperty('clusters', 'visibility', 'visible');
+      map.setLayoutProperty('cluster-count', 'visibility', 'visible');
+      map.setLayoutProperty('devices-circles', 'visibility', 'visible');
+      map.setLayoutProperty('clusters-outer', 'visibility', 'visible');
     }
-
 
     async function rerouteFor(deviceId) {
-        const affected = links.filter(l => l.from === deviceId || l.to === deviceId);
-        await Promise.all(affected.map(async link => {
-            const coords = await fetchRoute(pos[link.from], pos[link.to]);
-            linkCoords[link.id] = coords.map(([lat, lng]) => [lng, lat]);
-        }));
-        updateLinksSource();
+      const affected = links.filter(l => l.from === deviceId || l.to === deviceId);
+      await Promise.all(affected.map(async link => {
+        const coords = await fetchRoute(pos[link.from], pos[link.to]);
+        linkCoords[link.id] = coords.map(([lat, lng]) => [lng, lat]);
+      }));
+      updateLinksSource();
     }
+
 
     // single source for all links
     map.addSource('links', {
