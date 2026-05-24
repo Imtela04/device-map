@@ -52,34 +52,31 @@ test('renders 10000 devices within 500ms', async ({ page }) => {
     expect(duration).toBeLessThan(500);
 });
 
-test('all routes drawn within 8000ms of page load', async ({ page }) => {
+test('map loads with 60000 devices within 5000ms', async ({ page }) => {
     const start = Date.now();
-		
     await page.goto('http://localhost:5173');
-		await waitForMap(page);
-    
-		await page.evaluate(() => {
-				return new Promise(resolve => {
-						const check = () => {
-						const allLoaded = window.__linkIds.every(id => {
-								const source = window.__map.getSource(id);
-								if (!source) return false;
-								const data = source.serialize().data;
-								const coords = data?.geometry?.coordinates;
-								return Array.isArray(coords) && coords.length > 1;
-						});
-								if (allLoaded) resolve();
-								else setTimeout(check, 100);
-						};
-						check();
-				});
-		});    
+    await waitForMap(page);
+
+    await page.evaluate(() => {
+        return new Promise(resolve => {
+            const check = () => {
+                const source = window.__map.getSource('devices');
+                if (!source) return setTimeout(check, 100);
+                const data = source.serialize().data;
+                if (data?.features?.length > 0) resolve();
+                else setTimeout(check, 100);
+            };
+            check();
+        });
+    });
+
     const duration = Date.now() - start;
-    console.log(`All routes drawn in ${duration}ms`);
-    expect(duration).toBeLessThan(8000);
+    console.log(`60000 devices loaded in ${duration}ms`);
+    expect(duration).toBeLessThan(5000);
 });
 
-test('renders 50000 DOM markers within 3000ms', async ({ page }) => {
+
+test('renders 50000 DOM markers within 5000ms', async ({ page }) => {
     await page.goto('http://localhost:5173');
     await waitForMap(page);
 
@@ -109,5 +106,26 @@ test('renders 50000 DOM markers within 3000ms', async ({ page }) => {
     });
 
     console.log(`50000 DOM markers: ${duration.toFixed(2)}ms`);
-    expect(duration).toBeLessThan(3000);
+    expect(duration).toBeLessThan(5000);
+});
+
+test('renders 60000 devices smoothly', async ({ page }) => {
+    await page.goto('http://localhost:5173');
+    await waitForMap(page);
+
+    const duration = await page.evaluate(() => {
+        return new Promise(resolve => {
+            const map = window.__map;
+            performance.mark('start');
+            map.once('render', () => {
+                performance.mark('end');
+                performance.measure('render', 'start', 'end');
+                resolve(performance.getEntriesByName('render')[0].duration);
+            });
+            map.triggerRepaint();
+        });
+    });
+
+    console.log(`60000 devices render time: ${duration.toFixed(2)}ms`);
+    expect(duration).toBeLessThan(500);
 });

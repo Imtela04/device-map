@@ -23,13 +23,22 @@ export default function NetworkMap() {
     });
 
     mapInstanceRef.current = map;
+
+  map.on('load', async () => {
+    const [devices, links] = await Promise.all([
+      fetch('http://localhost:8000/api/devices').then(r => r.json()),
+      fetch('http://localhost:8000/api/links').then(r => r.json()),
+    ]);
+    console.log(`Fetched ${devices.length} devices and ${links.length} links`);
+
+
     if (import.meta.env.DEV) {
-        window.__map = map;
-        window.__linkIds = LINKS.map(l => l.id);
-        window.maplibregl = maplibregl
+      window.__map = map;
+      window.__linkIds = links.map(l => l.id);
+      window.maplibregl = maplibregl
     }
 
-    map.on('load', async () => {
+
     const popup = new maplibregl.Popup({
       closeButton: false,
       closeOnClick: false
@@ -49,126 +58,120 @@ export default function NetworkMap() {
       popup.remove();
     });
     const pos = Object.fromEntries(
-      DEVICES.map(d => [d.id, { lat: d.lat, lng: d.lng }])
+      devices.map(d => [d.id, { lat: d.lat, lng: d.lng }])
     );
 
     function showMarkers() {
+      if (markersRef.current.length === 0) {
+        // get visible bounds
+        const bounds = map.getBounds();
+        const visible = devices.filter(dev =>
+          dev.lng >= bounds.getWest() && dev.lng <= bounds.getEast() &&
+          dev.lat >= bounds.getSouth() && dev.lat <= bounds.getNorth()
+        );
+        visible.forEach(dev => {
+          const marker = createMarker(dev);
+          markersRef.current.push(marker);
+          marker.addTo(map);
+          // drag events here
+        });
+      } else {
         markersRef.current.forEach(m => m.addTo(map));
-        map.setLayoutProperty('devices-circles', 'visibility', 'none');
+      }
+      map.setLayoutProperty('devices-circles', 'visibility', 'none');
     }
 
     function hideMarkers() {
-        markersRef.current.forEach(m => m.remove());
-        map.setLayoutProperty('devices-circles', 'visibility', 'visible');
+      markersRef.current.forEach(m => m.remove());
+      map.setLayoutProperty('devices-circles', 'visibility', 'visible');
     }
-    map.on('zoom', () => {
-      map.getZoom() > 13? showMarkers() : hideMarkers();
-    });
-
     async function rerouteFor(deviceId) {
-      const affected = LINKS.filter(l => l.from === deviceId || l.to === deviceId);
+      const affected = links.filter(l => l.from === deviceId || l.to === deviceId);
       await Promise.all(affected.map(async link => {
-          const coords = await fetchRoute(pos[link.from], pos[link.to]);
-          map.getSource(link.id).setData(toGeoJSON(coords));
-          map.getSource('devices').setData({
-            type: 'FeatureCollection',
-            features: DEVICES.map(dev => ({
-                type: 'Feature',
-                geometry: { type: 'Point', coordinates: [pos[dev.id].lng, pos[dev.id].lat] },
-                properties: { id: dev.id, type: dev.type, name: dev.name }
-            }))
+        const coords = await fetchRoute(pos[link.from], pos[link.to]);
+        map.getSource(link.id).setData(toGeoJSON(coords));
+        map.getSource('devices').setData({
+          type: 'FeatureCollection',
+          features: devices.map(dev => ({
+            type: 'Feature',
+            geometry: { type: 'Point', coordinates: [pos[dev.id].lng, pos[dev.id].lat] },
+            properties: { id: dev.id, type: dev.type, name: dev.name }
+          }))
         });
       }));
     }
-    DEVICES.forEach(dev => {
-      const marker = createMarker(dev);
-      markersRef.current.push(marker);
-      marker.on('drag', async () => {
-        const lnglat = marker.getLngLat();
-        pos[dev.id] = { lat: lnglat.lat, lng: lnglat.lng };
 
-        LINKS.filter(l => l.from === dev.id || l.to === dev.id).forEach(link => {
-          map.getSource(link.id).setData(toGeoJSON([
-            [pos[link.from].lat, pos[link.from].lng],
-            [pos[link.to].lat,   pos[link.to].lng],
-          ]));
-        });
-      });
-      
-
-      marker.on('dragend', () => rerouteFor(dev.id));
+    // single source for all links
+    map.addSource('links', {
+      type: 'geojson',
+      data: {
+        type: 'FeatureCollection',
+        features: [] // populated after routes are fetched
+      }
     });
 
-    LINKS.forEach(link => {
-      map.addSource(link.id, {
-        type: 'geojson',
-        data: { type: 'Feature', geometry: { type: 'LineString', coordinates: [] } }
-    });
-    const linkPopup = new maplibregl.Popup({
-        closeButton: false,
-        closeOnClick: false
-    });
+    // one layer per link type
+    ['fiber', 'copper', 'wireless'].forEach(type => {
+      const paint = {
+        'line-color': type === 'fiber' ? '#22d3ee' : type === 'copper' ? '#f59e0b' : '#22c55e',
+        'line-width': 3,
+      };
+      if (type === 'copper') paint['line-dasharray'] = [6, 4];
+      if (type === 'wireless') paint['line-dasharray'] = [3, 6];
 
-    LINKS.forEach(link => {
-        map.on('mouseenter', link.id, (e) => {
-            map.getCanvas().style.cursor = 'pointer';
-            linkPopup
-                .setLngLat(e.lngLat)
-                .setHTML(`<strong>${link.from} → ${link.to}</strong><br/><span>${link.type}</span>`)
-                .addTo(map);
-        });
-
-        map.on('mouseleave', link.id, () => {
-            map.getCanvas().style.cursor = '';
-            linkPopup.remove();
-        });
-    });
-    const paint = {
-      'line-color': link.color,
-      'line-width': 3,
-    };
-    if (link.type === 'copper') paint['line-dasharray'] = [6, 4];
-    if (link.type === 'wireless') paint['line-dasharray'] = [3, 6];
-
-    map.addLayer({
-        id: link.id,
+      map.addLayer({
+        id: `links-${type}`,
         type: 'line',
-        source: link.id,
+        source: 'links',
+        filter: ['==', ['get', 'type'], type],
         paint
-    });
-
+      });
     });
     await loadDeviceIcons(map);
     map.addSource('devices', {
     type: 'geojson',
     data: {
-        type: 'FeatureCollection',
-        features: DEVICES.map(dev => ({
-            type: 'Feature',
-            geometry: { type: 'Point', coordinates: [dev.lng, dev.lat] },
-            properties: { id: dev.id, type: dev.type, name: dev.name }
-        }))
-      }
+      type: 'FeatureCollection',
+      features: devices.map(dev => ({
+        type: 'Feature',
+        geometry: { type: 'Point', coordinates: [dev.lng, dev.lat] },
+        properties: { id: dev.id, type: dev.type, name: dev.name }
+      }))
+    }
       
   
     });
 
     map.addLayer({
       id: 'devices-circles',
-      type: 'symbol',
+      type: 'circle',
       source: 'devices',
-      layout: {
-        'icon-image': ['get', 'type'],
-        'icon-size': 1,
-        'icon-allow-overlap': true,
+      paint: {
+          'circle-radius': 6,
+          'circle-color': ['match', ['get', 'type'],
+              'core-router', DEVICE_COLORS['core-router'],
+              'router',      DEVICE_COLORS['router'],
+              'switch',      DEVICE_COLORS['switch'],
+              'edge-router', DEVICE_COLORS['edge-router'],
+              'server',      DEVICE_COLORS['server'],
+              '#6b7280'
+          ],
+          'circle-stroke-width': 1,
+          'circle-stroke-color': '#ffffff'
       }
-    });
-    hideMarkers();
+  });
+  hideMarkers();
 
-    await Promise.all(LINKS.map(async link => {
-        const coords = await fetchRoute(pos[link.from], pos[link.to]);
-        map.getSource(link.id).setData(toGeoJSON(coords));
-    }));
+  function updateLinksSource(updatedLinks) {
+  map.getSource('links').setData({
+    type: 'FeatureCollection',
+    features: updatedLinks.map(link => ({
+      type: 'Feature',
+      geometry: { type: 'LineString', coordinates: link.coords || [] },
+      properties: { id: link.id, from: link.from, to: link.to, type: link.type }
+    }))
+  });
+}
 
   });  
   
