@@ -14,3 +14,7 @@ playwright-report/
 # Env
 .env
 *.env
+
+#dummy db geojson
+*.geojson
+*bangladesh*

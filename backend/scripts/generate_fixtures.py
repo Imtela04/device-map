@@ -36,10 +36,27 @@ def generate_devices():
             })
     return devices
 
+# --- NEW: GEOSPATIAL MATH FUNCTION ---
+def get_nearest(source_device, candidates, k=1, max_checks=400):
+    """
+    Finds the 'k' closest devices geographically.
+    To keep the script blazing fast, if there are tens of thousands of candidates, 
+    we take a random geographic sample of 400 to check distances against.
+    """
+    pool = candidates
+    if len(candidates) > max_checks:
+        pool = random.sample(candidates, max_checks)
+        
+    # Sort the pool by Euclidean distance (squared) to find the closest neighbors
+    pool.sort(key=lambda c: (c['lat'] - source_device['lat'])**2 + (c['lng'] - source_device['lng'])**2)
+    return pool[:k]
+
 def generate_links(devices):
     by_type = {}
     for dev in devices:
-        by_type.setdefault(dev['type'], []).append(dev['id'])
+        # Changed this to store the WHOLE device object, not just the ID, 
+        # so we can read their lat/lng coordinates!
+        by_type.setdefault(dev['type'], []).append(dev)
 
     links = []
     link_id = 1
@@ -55,26 +72,30 @@ def generate_links(devices):
         })
         link_id += 1
 
-    # routers → 1-2 core-routers (fiber)
-    for dev_id in by_type['router']:
-        targets = random.sample(by_type['core-router'], random.randint(1, 2))
+    print("Connecting network topologically (calculating spatial distances)...")
+
+    # routers → 1-2 nearest core-routers (fiber)
+    for dev in by_type['router']:
+        targets = get_nearest(dev, by_type['core-router'], k=random.randint(1, 2))
         for t in targets:
-            add_link(dev_id, t, 'fiber', '#22d3ee')
+            add_link(dev['id'], t['id'], 'fiber', '#22d3ee')
 
-    # switches → 1-2 routers (fiber)
-    for dev_id in by_type['switch']:
-        targets = random.sample(by_type['router'], random.randint(1, 2))
+    # switches → 1-2 nearest routers (fiber)
+    for dev in by_type['switch']:
+        targets = get_nearest(dev, by_type['router'], k=random.randint(1, 2))
         for t in targets:
-            add_link(dev_id, t, 'fiber', '#22d3ee')
+            add_link(dev['id'], t['id'], 'fiber', '#22d3ee')
 
-    # edge-routers → 1 switch (copper)
-    for dev_id in by_type['edge-router']:
-        add_link(dev_id, random.choice(by_type['switch']), 'copper', '#f59e0b')
+    # edge-routers → 1 nearest switch (copper)
+    for dev in by_type['edge-router']:
+        target = get_nearest(dev, by_type['switch'], k=1)[0]
+        add_link(dev['id'], target['id'], 'copper', '#f59e0b')
 
-    # servers → 1 switch or edge-router (copper)
+    # servers → 1 nearest switch or edge-router (copper)
     pool = by_type['switch'] + by_type['edge-router']
-    for dev_id in by_type['server']:
-        add_link(dev_id, random.choice(pool), 'copper', '#f59e0b')
+    for dev in by_type['server']:
+        target = get_nearest(dev, pool, k=1)[0]
+        add_link(dev['id'], target['id'], 'copper', '#f59e0b')
 
     return links
 
@@ -100,7 +121,7 @@ def main():
     with open('fixtures/links.json', 'w') as f:
         json.dump(links, f, indent=2)
 
-    print(f'Generated {len(devices)} devices and {len(links)} links')
+    print(f'Generated {len(devices)} devices and {len(links)} logically clustered links')
     print(f'fixtures/devices.json and fixtures/links.json written')
 
 if __name__ == '__main__':
