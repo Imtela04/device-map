@@ -1,9 +1,11 @@
-// utils/fetchRoute.js — replace entire file
 const inFlight = new Map();
+const resolved = new Map(); // ← persists for session lifetime
 
 export async function fetchRoute(a, b) {
   const key = `${a.lat},${a.lng},${b.lat},${b.lng}`;
-  if (inFlight.has(key)) return inFlight.get(key);
+  
+  if (resolved.has(key)) return resolved.get(key);  // instant
+  if (inFlight.has(key)) return inFlight.get(key);  // dedupe concurrent
 
   const promise = (async () => {
     try {
@@ -13,9 +15,11 @@ export async function fetchRoute(a, b) {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ a, b }),
-        signal: ctrl.signal
+        signal: ctrl.signal,
       });
-      return await res.json();
+      const data = await res.json();
+      resolved.set(key, data);   // ← cache the result
+      return data;
     } catch {
       return [[a.lat, a.lng], [b.lat, b.lng]];
     } finally {
