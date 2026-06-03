@@ -1,6 +1,6 @@
 const fs = require('fs');
 
-console.log("Loading dummy data...");
+//console.log("Loading dummy data...");
 
 const devices = JSON.parse(fs.readFileSync('devices.json', 'utf-8'));
 const links = JSON.parse(fs.readFileSync('links.json', 'utf-8'));
@@ -24,7 +24,7 @@ async function getRoadRoute(fromLng, fromLat, toLng, toLat) {
 }
 
 async function buildGeoJSON() {
-    console.log(`Processing ${links.length} links using Streams and Batching...`);
+    //console.log(`Processing ${links.length} links using Streams and Batching...`);
     
     // Create a pipeline directly to the hard drive
     const writeStream = fs.createWriteStream('dummy-routes.geojson');
@@ -77,7 +77,7 @@ async function buildGeoJSON() {
         }
 
         if ((i + BATCH_SIZE) % 1000 === 0 || (i + BATCH_SIZE) >= links.length) {
-            console.log(`Finished ${Math.min(i + BATCH_SIZE, links.length)} / ${links.length} links...`);
+            //console.log(`Finished ${Math.min(i + BATCH_SIZE, links.length)} / ${links.length} links...`);
         }
     }
 
@@ -86,7 +86,7 @@ async function buildGeoJSON() {
     writeStream.end();
     
     writeStream.on('finish', () => {
-        console.log(`Success! Streamed curvy road routes directly to dummy-routes.geojson.`);
+        //console.log(`Success! Streamed curvy road routes directly to dummy-routes.geojson.`);
     });
 }
 

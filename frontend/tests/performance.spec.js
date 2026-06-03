@@ -32,7 +32,7 @@ test('renders 100 devices within 100ms', async ({ page }) => {
     await page.goto('http://localhost:5173');
 		await waitForMap(page)
     const duration = await measureRenderTime(page, 100);
-    console.log(`100 devices: ${duration.toFixed(2)}ms`);
+    //console.log(`100 devices: ${duration.toFixed(2)}ms`);
     expect(duration).toBeLessThan(100);
 });
 
@@ -40,7 +40,7 @@ test('renders 1000 devices within 200ms', async ({ page }) => {
     await page.goto('http://localhost:5173');
     await waitForMap(page);
     const duration = await measureRenderTime(page, 1000);
-    console.log(`1000 devices: ${duration.toFixed(2)}ms`);
+    //console.log(`1000 devices: ${duration.toFixed(2)}ms`);
     expect(duration).toBeLessThan(200);
 });
 
@@ -48,7 +48,7 @@ test('renders 10000 devices within 500ms', async ({ page }) => {
     await page.goto('http://localhost:5173');
     await waitForMap(page);
     const duration = await measureRenderTime(page, 10000);
-    console.log(`10000 devices: ${duration.toFixed(2)}ms`);
+    //console.log(`10000 devices: ${duration.toFixed(2)}ms`);
     expect(duration).toBeLessThan(500);
 });
 
@@ -71,7 +71,7 @@ test('map loads with 60000 devices within 5000ms', async ({ page }) => {
     });
 
     const duration = Date.now() - start;
-    console.log(`60000 devices loaded in ${duration}ms`);
+    //console.log(`60000 devices loaded in ${duration}ms`);
     expect(duration).toBeLessThan(5000);
 });
 
@@ -105,7 +105,7 @@ test('renders 50000 DOM markers within 5000ms', async ({ page }) => {
         });
     });
 
-    console.log(`50000 DOM markers: ${duration.toFixed(2)}ms`);
+    //console.log(`50000 DOM markers: ${duration.toFixed(2)}ms`);
     expect(duration).toBeLessThan(5000);
 });
 
@@ -126,6 +126,6 @@ test('renders 60000 devices smoothly', async ({ page }) => {
         });
     });
 
-    console.log(`60000 devices render time: ${duration.toFixed(2)}ms`);
+    //console.log(`60000 devices render time: ${duration.toFixed(2)}ms`);
     expect(duration).toBeLessThan(500);
 });
