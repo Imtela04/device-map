@@ -1,17 +1,17 @@
 import { useEffect, useRef } from 'react';
 import maplibregl from 'maplibre-gl';
 import { Protocol } from 'pmtiles';
-import Legend from './Legend';
 import { createMarker } from '../utils/createMarker'; 
 
 export default function NetworkMap() {
-  const mapRef = useRef(null);
-  const mapInstanceRef = useRef(null);
-  const markersRef = useRef([]);
-  // Keep track of modified route IDs so we can hide them in the static PMTiles layer
-  const modifiedRouteIdsRef = useRef(new Set());
-  // Keep a running reference of our live GeoJSON features
-  const liveRoutesRef = useRef({ type: 'FeatureCollection', features: [] });
+  const mapRef                        = useRef(null);
+  const mapInstanceRef                = useRef(null);
+  const markersRef                    = useRef([]);
+
+  const modifiedRouteIdsRef           = useRef(new Set());
+  const liveRoutesRef                 = useRef({ type: 'FeatureCollection', features: [] });
+  const focusedDeviceIdRef            = useRef(null);
+  const mainDevicesRef                = useRef([]); 
 
   useEffect(() => {
     if (mapInstanceRef.current) return;
@@ -29,64 +29,80 @@ export default function NetworkMap() {
     mapInstanceRef.current = map;
 
     map.on('load', async () => {
+
+      const toGeoJSONFeature = (device) => ({
+        type: 'Feature',
+        geometry: { type: 'Point', coordinates: [device.lng, device.lat] },
+        properties: { ...device }
+      });
+
       const [devices, links, dbRoutes] = await Promise.all([
         fetch('http://localhost:8000/api/devices').then(r => r.json()),
         fetch('http://localhost:8000/api/links').then(r => r.json()),
         fetch('http://localhost:8000/api/routes/geojson').then(r => r.json()).catch(() => null)
       ]);
 
-      const devMap = Object.fromEntries(devices.map(d => [d.id, d]));
-
+      // --- 1. STRICT STRING TOPOLOGY DICTIONARIES ---
+      const devMap = {};
       const linksByDevice = {};
-      devices.forEach(d => linksByDevice[d.id] = []);
+      
+      devices.forEach(d => {
+        const strId = String(d.id);
+        devMap[strId] = d;
+        linksByDevice[strId] = [];
+      });
+
       links.forEach(l => {
-        if (!linksByDevice[l.from]) linksByDevice[l.from] = [];
-        if (!linksByDevice[l.to]) linksByDevice[l.to] = [];
-        linksByDevice[l.from].push(l);
-        linksByDevice[l.to].push(l);
+        const fromId = String(l.from);
+        const toId = String(l.to);
+        if (!linksByDevice[fromId]) linksByDevice[fromId] = [];
+        if (!linksByDevice[toId]) linksByDevice[toId] = [];
+        linksByDevice[fromId].push(l);
+        linksByDevice[toId].push(l);
       });
 
-      if (dbRoutes?.features?.length > 0) {
-        liveRoutesRef.current = dbRoutes;
-        dbRoutes.features.forEach(f => modifiedRouteIdsRef.current.add(f.properties.id));
-      }
-
-      const popup = new maplibregl.Popup({ closeButton: false, closeOnClick: false });
-
-      map.addSource('links-vector', {
-        type: 'vector',
-        url: `pmtiles://${window.location.origin}/dummy-network.pmtiles?v=4` 
-      });
-
-      map.addSource('live-routes', { 
-        type: 'geojson', 
-        data: liveRoutesRef.current 
+      const mainTypes = ['core router', 'edge router', 'olt'];
+      const accessDevices = [];
+      mainDevicesRef.current = []; 
+      
+      devices.forEach(d => {
+        const normalizedType = (d.type || '').toLowerCase().trim();
+        if (mainTypes.includes(normalizedType)) mainDevicesRef.current.push(d);
+        else accessDevices.push(d);
       });
 
       map.addSource('devices', {
         type: 'geojson',
         cluster: true,
-        clusterMaxZoom: 12, 
+        clusterMaxZoom: 12,
         clusterRadius: 50,
-        data: { type: 'FeatureCollection', features: [] } 
+        data: { type: 'FeatureCollection', features: accessDevices.map(toGeoJSONFeature) } 
       });
 
-      const addRouteLayers = (sourceId, prefix, sourceLayer = null) => {
-        ['fiber', 'copper', 'wireless'].forEach(type => {
-          const layerId = `${prefix}-${type}`;
-          const paint = {
-            'line-color': type === 'fiber' ? '#22d3ee' : type === 'copper' ? '#f59e0b' : '#22c55e',
-            'line-width': 4,
-          };
-          if (type === 'copper') paint['line-dasharray'] = [6, 4];
-          if (type === 'wireless') paint['line-dasharray'] = [3, 6];
+      map.addSource('main-devices', {
+        type: 'geojson',
+        data: { type: 'FeatureCollection', features: mainDevicesRef.current.map(toGeoJSONFeature) }
+      });
 
+      map.addLayer({
+        id: 'unclustered-main-devices',
+        type: 'circle',
+        source: 'main-devices',
+        maxzoom: 12,
+        paint: {
+          'circle-color': ['match', ['get', 'type'], 'Core Router', '#ef4444', 'Edge Router', '#8b5cf6', 'OLT', '#14b8a6', '#eab308'],
+          'circle-radius': 8,
+          'circle-stroke-width': 2,
+          'circle-stroke-color': '#ffffff'
+        }
+      });
+
+      const popup = new maplibregl.Popup({ closeButton: false, closeOnClick: false });
+      
+      const addRouteLayers = (sourceId, prefix, sourceLayer = null) => {
+          const layerId = `${prefix}-generic`;
           const layerConfig = {
-            id: layerId,
-            type: 'line',
-            source: sourceId,
-            filter: ['==', ['get', 'type'], type], 
-            paint
+            id: layerId, type: 'line', source: sourceId, paint: { 'line-color': '#94a3b8', 'line-width': 4 }
           };
           if (sourceLayer) layerConfig['source-layer'] = sourceLayer;
 
@@ -98,7 +114,7 @@ export default function NetworkMap() {
               const props = e.features[0].properties;
               popup.setLngLat(e.lngLat).setHTML(
                   `<div style="padding: 4px;">
-                    <strong>${props.type ? props.type.toUpperCase() : 'UNKNOWN'} Link</strong><br/>
+                    <strong>Link Data</strong><br/>
                     <span style="font-size: 0.9em; color: #555;">From: ${props.fromName || props.from}</span><br/>
                     <span style="font-size: 0.9em; color: #555;">To: ${props.toName || props.to}</span>
                   </div>`
@@ -109,18 +125,30 @@ export default function NetworkMap() {
             map.getCanvas().style.cursor = '';
             popup.remove();
           });
-        });
       };
+      
+      if (!map.getSource('links-vector')) {
+          map.addSource('links-vector', {
+              type: 'vector',
+              url: `pmtiles://${window.location.origin}/dummy-network.pmtiles` 
+          });
+      }
+      
+      if (!map.getSource('live-routes')) {
+          map.addSource('live-routes', {
+              type: 'geojson',
+              data: liveRoutesRef.current
+          });
+      }
 
+      // Check your PMTiles file to ensure 'networklinks' is the correct layer name!
       addRouteLayers('links-vector', 'links', 'networklinks');
-      ['fiber', 'copper', 'wireless'].forEach(type => map.setFilter(`links-${type}`, ['==', ['get', 'type'], 'HIDDEN_DEFAULT']));
+      map.setFilter('links-generic', ['==', 'HIDDEN', 'DEFAULT']); 
       addRouteLayers('live-routes', 'live');
 
+      // --- CLUSTER RENDERING ---
       map.addLayer({
-        id: 'clusters-outer',
-        type: 'circle',
-        source: 'devices',
-        filter: ['has', 'point_count'],
+        id: 'clusters-outer', type: 'circle', source: 'devices', filter: ['has', 'point_count'],
         paint: {
           'circle-color': ['step', ['get', 'point_count'], 'rgba(34, 197, 94, 0.15)', 100, 'rgba(245, 158, 11, 0.15)', 1000, 'rgba(239, 68, 68, 0.15)'],
           'circle-radius': ['step', ['get', 'point_count'], 12, 100, 15, 1000, 18],
@@ -129,10 +157,7 @@ export default function NetworkMap() {
         }
       });
       map.addLayer({
-        id: 'clusters',
-        type: 'circle',
-        source: 'devices',
-        filter: ['has', 'point_count'],
+        id: 'clusters', type: 'circle', source: 'devices', filter: ['has', 'point_count'],
         paint: {
           'circle-color': ['step', ['get', 'point_count'], '#22c55e', 100, '#f59e0b', 1000, '#ef4444'],
           'circle-radius': ['step', ['get', 'point_count'], 9, 100, 12, 1000, 15],
@@ -140,141 +165,141 @@ export default function NetworkMap() {
         }
       });
       map.addLayer({
-        id: 'cluster-count',
-        type: 'symbol',
-        source: 'devices',
-        filter: ['has', 'point_count'],
-        layout: {
-          'text-field': '{point_count_abbreviated}',
-          'text-size': 11,
-          'text-font': ['Open Sans Bold', 'Arial Unicode MS Bold']
-        },
+        id: 'cluster-count', type: 'symbol', source: 'devices', filter: ['has', 'point_count'],
+        layout: { 'text-field': '{point_count_abbreviated}', 'text-size': 11, 'text-font': ['Open Sans Bold', 'Arial Unicode MS Bold'] },
         paint: { 'text-color': '#ffffff' }
       });
 
       const updateClusterSource = () => {
         const source = map.getSource('devices');
-        if (source) {
-          source.setData({
-            type: 'FeatureCollection',
-            features: devices.map(dev => ({
-              type: 'Feature',
-              geometry: { type: 'Point', coordinates: [dev.lng, dev.lat] },
-              properties: { id: dev.id, type: dev.type, name: dev.name }
-            }))
-          });
-        }
+        if (source) source.setData({ type: 'FeatureCollection', features: accessDevices.map(toGeoJSONFeature) });
       };
-      updateClusterSource();
 
+      // --- 2. SAFE UPDATE FUNCTION ---
       function updateLiveRouteInMap(linkId, linkType, coordinates, props = {}) {
-        const features = liveRoutesRef.current.features.filter(f => f.properties.id !== linkId);
+        const safeId = String(linkId);
+        const features = liveRoutesRef.current.features.filter(f => String(f.properties.id) !== safeId);
         features.push({
           type: 'Feature',
-          properties: { id: linkId, type: linkType, ...props },
+          properties: { id: safeId, type: linkType, ...props },
           geometry: { type: 'LineString', coordinates }
         });
         liveRoutesRef.current.features = features;
         map.getSource('live-routes').setData(liveRoutesRef.current);
-        modifiedRouteIdsRef.current.add(linkId);
+        modifiedRouteIdsRef.current.add(safeId);
       }
 
-      // --- NEW: EXTRACTED FILTER LOGIC ---
       function refreshFilters() {
-        const bounds = map.getBounds();
-        const visible = devices.filter(dev =>
-          dev.lng >= bounds.getWest() && dev.lng <= bounds.getEast() &&
-          dev.lat >= bounds.getSouth() && dev.lat <= bounds.getNorth()
-        );
+        const focusId = focusedDeviceIdRef.current;
+        
+        // Pass both strings and numbers to MapLibre to avoid type comparison failures inside the WebGL shader
+        const strIds = Array.from(modifiedRouteIdsRef.current).map(String);
+        const numIds = Array.from(modifiedRouteIdsRef.current).map(Number).filter(n => !isNaN(n));
+        const modifiedIdsArray = [...strIds, ...numIds]; 
 
-        const visibleIdStrings = visible.map(dev => String(dev.id));
-        const visibleIdNumbers = visible.map(dev => Number(dev.id));
-        const modifiedIdsArray = Array.from(modifiedRouteIdsRef.current);
+        let filterExpression;
 
-        ['fiber', 'copper', 'wireless'].forEach(type => {
-          const typeCap = type.charAt(0).toUpperCase() + type.slice(1);
-          if (map.getLayer(`links-${type}`)) {
-            map.setFilter(`links-${type}`, [
-              'all', 
-              ['any', ['==', ['get', 'type'], type], ['==', ['get', 'type'], typeCap]],
-              ['!', ['in', ['get', 'id'], ['literal', modifiedIdsArray]]],
-              ['any', 
-                ['in', ['get', 'from'], ['literal', visibleIdStrings]],
-                ['in', ['get', 'from'], ['literal', visibleIdNumbers]],
-                ['in', ['get', 'to'], ['literal', visibleIdStrings]],
-                ['in', ['get', 'to'], ['literal', visibleIdNumbers]]
-              ]
-            ]);
-          }
-        });
-        return visible;
+        if (focusId) {
+          const focusStr = String(focusId);
+          const focusNum = Number(focusId);
+          const focusCheck = [
+            'any', 
+            ['==', ['get', 'from'], focusStr],
+            ['==', ['get', 'from'], focusNum],
+            ['==', ['get', 'to'], focusStr],
+            ['==', ['get', 'to'], focusNum]
+          ];
+
+          filterExpression = modifiedIdsArray.length > 0 
+            ? ['all', ['!', ['in', ['get', 'id'], ['literal', modifiedIdsArray]]], focusCheck]
+            : focusCheck;
+        } else {
+          filterExpression = modifiedIdsArray.length > 0 
+            ? ['!', ['in', ['get', 'id'], ['literal', modifiedIdsArray]]] 
+            : null;
+        }
+
+        if (map.getLayer('links-generic')) map.setFilter('links-generic', filterExpression);
       }
 
       function showMarkers() {
         markersRef.current.forEach(m => m.remove());
         markersRef.current = [];
 
-        // Apply filters to figure out what should be drawn
-        const visible = refreshFilters();
+        const bounds = map.getBounds();
+        const focusId = focusedDeviceIdRef.current;
+        let devicesToRender = [];
 
-        //Turn visibility back on for ALL route lines
-        ['fiber', 'copper', 'wireless'].forEach(type => {
-          if (map.getLayer(`links-${type}`)) {
-            map.setLayoutProperty(`links-${type}`, 'visibility', 'visible');
-          }
-          if (map.getLayer(`live-${type}`)) {
-            map.setLayoutProperty(`live-${type}`, 'visibility', 'visible');
-          }
+        if (focusId) {
+          const connectedLinks = linksByDevice[String(focusId)] || [];
+          const neighborIds = connectedLinks.map(l => String(l.from) === String(focusId) ? String(l.to) : String(l.from));
+          devicesToRender = devices.filter(d => String(d.id) === String(focusId) || neighborIds.includes(String(d.id)));
+        } else {
+          devicesToRender = devices.filter(dev =>
+            dev.lng >= bounds.getWest() && dev.lng <= bounds.getEast() &&
+            dev.lat >= bounds.getSouth() && dev.lat <= bounds.getNorth()
+          );
+        }
+
+        ['links', 'live'].forEach(prefix => {
+          if (map.getLayer(`${prefix}-generic`)) map.setLayoutProperty(`${prefix}-generic`, 'visibility', 'visible');
         });
 
-        visible.forEach(dev => {
+        refreshFilters();
+
+        devicesToRender.forEach(dev => {
           const marker = createMarker(dev);
           markersRef.current.push(marker);
           marker.addTo(map);
 
-          // WHEN DRAG STARTS: Tell PMTiles to hide this specific route
+          marker.getElement().addEventListener('click', (e) => {
+            e.stopPropagation();
+            focusedDeviceIdRef.current = dev.id;
+            showMarkers(); 
+          });
+
+          // --- 3. BULLETPROOF DRAG LOGIC ---
           marker.on('dragstart', () => {
-             const affected = linksByDevice[dev.id] || [];
-             affected.forEach(l => modifiedRouteIdsRef.current.add(l.id));
+             const affected = linksByDevice[String(dev.id)] || [];
+             affected.forEach(l => modifiedRouteIdsRef.current.add(String(l.id)));
              refreshFilters();
           });
 
-          // WHILE DRAGGING: Update GeoJSON only! (No showMarkers loop)
           marker.on('drag', () => {
             const coords = marker.getLngLat();
             dev.lng = coords.lng;
             dev.lat = coords.lat;
 
-            const affected = linksByDevice[dev.id] || [];
+            const affected = linksByDevice[String(dev.id)] || [];
             affected.forEach(link => {
-              const isFrom = link.from === dev.id;
-              const otherDevId = isFrom ? link.to : link.from;
+              const isFrom = String(link.from) === String(dev.id);
+              const otherDevId = isFrom ? String(link.to) : String(link.from);
               const otherDev = devMap[otherDevId];
-              
+
               if (otherDev) {
                 const lineCoords = isFrom 
                   ? [[coords.lng, coords.lat], [otherDev.lng, otherDev.lat]]
                   : [[otherDev.lng, otherDev.lat], [coords.lng, coords.lat]];
                 
-                updateLiveRouteInMap(link.id, link.type, lineCoords, { from: link.from, to: link.to });
+                updateLiveRouteInMap(link.id, 'generic', lineCoords, { from: link.from, to: link.to });
               }
             });
           });
 
-          // WHEN DRAG FINISHES: Call Backend
           marker.on('dragend', async () => {
             const coords = marker.getLngLat();
             dev.lng = coords.lng;
             dev.lat = coords.lat;
 
-            const affected = linksByDevice[dev.id] || [];
+            const affected = linksByDevice[String(dev.id)] || [];
 
             await Promise.all(affected.map(async link => {
-              const from = devMap[link.from];
-              const to = devMap[link.to];
+              const from = devMap[String(link.from)];
+              const to = devMap[String(link.to)];
+              
+              if (!from || !to) return; // Prevent crashes if graph is malformed
               
               try {
-                //console.log(`Fetching real route for ${link.id}...`);
                 const response = await fetch('http://localhost:8000/api/route', {
                   method: 'POST',
                   headers: { 'Content-Type': 'application/json' },
@@ -282,24 +307,19 @@ export default function NetworkMap() {
                     a: { lat: from.lat, lng: from.lng },
                     b: { lat: to.lat, lng: to.lng },
                     link_id: `${link.from}-${link.to}`,
-                    link_type: link.type
+                    link_type: 'generic'
                   })
                 });
 
                 if (!response.ok) throw new Error(`Backend returned status ${response.status}`);
-
                 const osrmCoords = await response.json();
-                //console.log("Backend Response:", osrmCoords);
-                
-                // If it's a straight line, your backend returned [[lat,lng], [lat,lng]]!
                 const geoJsonCoords = osrmCoords.map(([lat, lng]) => [lng, lat]);
-                updateLiveRouteInMap(link.id, link.type, geoJsonCoords, { from: link.from, to: link.to });
+                updateLiveRouteInMap(link.id, 'generic', geoJsonCoords, { from: link.from, to: link.to });
                 
               } catch (err) {
                 console.error(`OSRM Fetch Failed for link ${link.id}:`, err);
               }
             }));
-
             updateClusterSource();
           });
         });
@@ -313,20 +333,15 @@ export default function NetworkMap() {
         markersRef.current.forEach(m => m.remove());
         markersRef.current = [];
 
-        // --- NEW: Hide ALL route lines (Both PMTiles and Live OSRM routes) ---
-        ['fiber', 'copper', 'wireless'].forEach(type => {
-          if (map.getLayer(`links-${type}`)) {
-            map.setLayoutProperty(`links-${type}`, 'visibility', 'none');
-          }
-          if (map.getLayer(`live-${type}`)) {
-            map.setLayoutProperty(`live-${type}`, 'visibility', 'none');
-          }
+        ['links', 'live'].forEach(prefix => {
+          if (map.getLayer(`${prefix}-generic`)) map.setLayoutProperty(`${prefix}-generic`, 'visibility', 'none');
         });
 
         map.setLayoutProperty('clusters', 'visibility', 'visible');
         map.setLayoutProperty('cluster-count', 'visibility', 'visible');
         map.setLayoutProperty('clusters-outer', 'visibility', 'visible');
       }
+      
       hideMarkers();
 
       map.on('moveend', () => { if (map.getZoom() >= 12) showMarkers(); });
@@ -334,11 +349,14 @@ export default function NetworkMap() {
 
       map.on('click', (e) => {
         if (e.originalEvent.target.tagName.toLowerCase() !== 'canvas') return;
-        ['fiber', 'copper', 'wireless'].forEach(type => {
-            if (map.getLayer(`links-${type}`)) {
-                map.setFilter(`links-${type}`, ['==', ['get', 'type'], 'HIDDEN_DEFAULT']);
-            }
-        });
+        focusedDeviceIdRef.current = null;
+        if (map.getZoom() >= 12) {
+          showMarkers(); 
+        } else {
+          ['links', 'live'].forEach(prefix => {
+            if (map.getLayer(`${prefix}-generic`)) map.setFilter(`${prefix}-generic`, ['==', 'HIDDEN', 'DEFAULT']);
+          });
+        }
       });
 
       map.on('click', 'clusters', async (e) => {
@@ -351,7 +369,9 @@ export default function NetworkMap() {
       map.on('mouseenter', 'clusters-outer', () => { map.getCanvas().style.cursor = 'pointer'; });
       map.on('mouseleave', 'clusters-outer', () => { map.getCanvas().style.cursor = ''; });
 
-    });    return () => {
+    });    
+
+    return () => {
       map.remove();
       mapInstanceRef.current = null;
       maplibregl.removeProtocol('pmtiles'); 
@@ -361,7 +381,6 @@ export default function NetworkMap() {
   return (
     <div className='relative'>
         <div ref={mapRef} style={{ height: '100vh', width: '100%' }} />
-        <Legend/>
     </div>
   )
 }
