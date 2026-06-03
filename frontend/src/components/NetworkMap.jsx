@@ -214,8 +214,18 @@ export default function NetworkMap() {
         markersRef.current.forEach(m => m.remove());
         markersRef.current = [];
 
-        // Apply filters without recreating markers
+        // Apply filters to figure out what should be drawn
         const visible = refreshFilters();
+
+        //Turn visibility back on for ALL route lines
+        ['fiber', 'copper', 'wireless'].forEach(type => {
+          if (map.getLayer(`links-${type}`)) {
+            map.setLayoutProperty(`links-${type}`, 'visibility', 'visible');
+          }
+          if (map.getLayer(`live-${type}`)) {
+            map.setLayoutProperty(`live-${type}`, 'visibility', 'visible');
+          }
+        });
 
         visible.forEach(dev => {
           const marker = createMarker(dev);
@@ -302,11 +312,21 @@ export default function NetworkMap() {
       function hideMarkers() {
         markersRef.current.forEach(m => m.remove());
         markersRef.current = [];
+
+        // --- NEW: Hide ALL route lines (Both PMTiles and Live OSRM routes) ---
+        ['fiber', 'copper', 'wireless'].forEach(type => {
+          if (map.getLayer(`links-${type}`)) {
+            map.setLayoutProperty(`links-${type}`, 'visibility', 'none');
+          }
+          if (map.getLayer(`live-${type}`)) {
+            map.setLayoutProperty(`live-${type}`, 'visibility', 'none');
+          }
+        });
+
         map.setLayoutProperty('clusters', 'visibility', 'visible');
         map.setLayoutProperty('cluster-count', 'visibility', 'visible');
         map.setLayoutProperty('clusters-outer', 'visibility', 'visible');
       }
-
       hideMarkers();
 
       map.on('moveend', () => { if (map.getZoom() >= 12) showMarkers(); });
