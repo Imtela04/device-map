@@ -17,4 +17,6 @@ playwright-report/
 
 #dummy db geojson
 *.geojson
+*.osrm
+*.pbf
 *bangladesh*

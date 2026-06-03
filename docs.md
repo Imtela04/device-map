@@ -3,13 +3,15 @@
 ## Table of Contents
 
 1. [Overview](#overview)
-2. [Frontend](#frontend)
-3. [Backend](#backend)
-4. [Authentication](#authentication)
-5. [Routing & Caching](#routing--caching)
-6. [Testing](#testing)
-7. [Data Structures](#data-structures)
-8. [Key Design Decisions](#key-design-decisions)
+2. [Local Development](#local-development)
+3. [Frontend](#frontend)
+4. [Backend](#backend)
+5. [Authentication](#authentication)
+6. [Routing & Caching](#routing--caching)
+7. [Static vs Live Routes](#static-vs-live-routes)
+8. [Testing](#testing)
+9. [Data Structures](#data-structures)
+10. [Key Design Decisions](#key-design-decisions)
 
 ---
 
@@ -20,7 +22,42 @@ Device Maps is a network topology visualisation dashboard. It renders network in
 The system is split into two processes:
 
 - **Frontend** — React app served by Vite, renders the map and UI
-- **Backend** — FastAPI server, proxies routing requests to OSRM with caching and handles authentication
+- **Backend** — FastAPI server, proxies routing requests to OSRM with caching, persists dragged routes to SQLite, and handles authentication
+
+---
+
+## Local Development
+
+### Service Map
+
+| Service  | Technology        | Port | Start condition                   |
+|----------|-------------------|------|-----------------------------------|
+| OSRM     | Docker            | 5000 | Every session                     |
+| Backend  | FastAPI + uvicorn | 8000 | Every session                     |
+| Frontend | Vite dev server   | 5173 | Every session                     |
+
+OSRM **must be running before the backend** serves route requests. It does not persist state — it reads the pre-processed `.osrm` binary files in `backend/osrm-data/` on startup.
+
+### One-command startup (Windows)
+
+```powershell
+.\start.ps1              # starts OSRM, backend, frontend
+.\start.ps1 -SkipDocker  # skips OSRM if already running
+```
+
+Each service opens in its own PowerShell window. Close all three windows to shut down.
+
+### `start.ps1` — how it works
+
+The script checks whether an OSRM container is already bound to port 5000 before starting a new one (`docker ps --filter "publish=5000"`), preventing duplicate container errors. Backend and frontend each launch in a separate `Start-Process powershell` window so their stdout streams are readable independently. The `-SkipDocker` flag is useful when iterating on backend or frontend code without restarting the routing engine.
+
+### OSRM data directory
+
+Pre-processed OSRM binary files live in `backend/osrm-data/`. This folder is excluded from version control (`.gitignore`) because the files are large binaries regenerated from OSM source data. The Docker volume mount in `start.ps1` points to this directory:
+
+```
+backend/osrm-data/ → /data (inside container)
+```
 
 ---
 
@@ -33,20 +70,20 @@ The map is initialised inside a `useEffect` with an empty dependency array, mean
 ```
 useEffect runs once
   → creates maplibregl.Map instance
-  → stores in mapInstanceRef
-  → exposes window.__map, window.__linkIds, window.maplibregl (DEV only)
+  → registers PMTiles protocol (pmtiles://)
+  → stores map in mapInstanceRef
   → on 'load' event:
-      → builds pos object (mutable device positions)
-      → defines showMarkers() / hideMarkers()
-      → registers zoom event for hybrid switching
-      → defines rerouteFor()
-      → creates DOM markers, stores in markersRef
-      → adds link sources and layers
-      → loads icon sprites via loadDeviceIcons()
-      → adds devices GeoJSON source and symbol layer
-      → adds device and link hover tooltips
-      → calls hideMarkers() (starting zoom is 11, below threshold)
-      → fetches initial routes for all links
+      → fetches devices, links, and persisted routes from backend
+      → builds devMap and linksByDevice lookup objects
+      → adds PMTiles source (links-vector) — static pre-routed links
+      → adds GeoJSON source (live-routes) — dragged + persisted routes
+      → adds GeoJSON source (devices) — clustered device points
+      → adds route layers for both sources (fiber / copper / wireless)
+      → adds cluster layers (clusters-outer, clusters, cluster-count)
+      → populates devices source with all 60,000 devices
+      → calls hideMarkers() (starting zoom is below threshold)
+  → on 'zoomend': showMarkers() if zoom ≥ 12, else hideMarkers()
+  → on 'moveend': showMarkers() if zoom ≥ 12 (re-renders visible viewport)
   → cleanup: map.remove() on unmount
 ```
 
@@ -58,128 +95,98 @@ The map uses two rendering strategies depending on zoom level:
 
 | Zoom | Mode | Technology | Max devices |
 |---|---|---|---|
-| ≤ 13 | GeoJSON symbol layer | WebGL | 100,000+ |
-| > 13 | DOM markers | HTML/CSS | ~1,000 |
+| < 12 | GeoJSON cluster layer | WebGL | 100,000+ |
+| ≥ 12 | DOM markers | HTML/CSS | ~1,000 visible |
 
-**Why two modes?** DOM markers are draggable and support rich interactivity, but each is a separate DOM node. Browsers struggle past ~1,000 DOM elements. WebGL renders from a single GeoJSON source and can handle hundreds of thousands of points.
+**Why two modes?** DOM markers are draggable and support rich interactivity, but each is a separate DOM node. Browsers struggle past ~1,000 DOM elements. WebGL cluster layers scale to hundreds of thousands of points and show aggregate counts at low zoom.
 
-The switch is triggered by `map.on('zoom')`:
+The switch is triggered by `map.on('zoomend')`:
 
 ```js
-map.on('zoom', () => {
-    map.getZoom() > 13 ? showMarkers() : hideMarkers();
+map.on('zoomend', () => {
+  map.getZoom() >= 12 ? showMarkers() : hideMarkers();
 });
 ```
 
-`showMarkers()` adds DOM markers to the map and hides the symbol layer. `hideMarkers()` removes DOM markers and shows the symbol layer. DOM marker instances are stored in `markersRef` (a `useRef`) so they persist between zoom events without triggering re-renders.
+`showMarkers()` queries the current viewport bounds, creates DOM markers only for visible devices, hides cluster layers, and attaches drag event handlers. `hideMarkers()` removes DOM markers and restores cluster layers. `map.on('moveend')` re-runs `showMarkers()` when panning at high zoom to load markers for newly visible devices.
 
-**Position sync:** When a marker is dragged at high zoom, `pos[dev.id]` is updated. On `dragend`, `rerouteFor()` also rebuilds the `devices` GeoJSON source from current `pos` values, so circles reflect the new position when zooming back out.
+**Position sync:** When a marker is dragged, `dev.lng` / `dev.lat` are mutated in place (the `devMap` object). On `dragend`, `updateClusterSource()` rebuilds the devices GeoJSON from the updated values, so clusters reflect the new position when zooming back out.
+
+### Route Layers (PMTiles + Live GeoJSON)
+
+Two parallel sets of layers render link geometry:
+
+```
+links-fiber    ← source: links-vector (PMTiles)
+links-copper
+links-wireless
+
+live-fiber     ← source: live-routes (GeoJSON)
+live-copper
+live-wireless
+```
+
+On load, the PMTiles layers are hidden with a `HIDDEN_DEFAULT` filter. `refreshFilters()` rebuilds the PMTiles filter to show only links whose `from` or `to` device is within the current viewport bounds, excluding any link IDs in `modifiedRouteIdsRef`. This prevents both sources from rendering the same link simultaneously.
+
+### `refreshFilters()`
+
+Called on `dragstart` and inside `showMarkers()`. Computes visible devices from `map.getBounds()`, then constructs a MapLibre filter expression that:
+
+1. Matches the correct link type (`fiber`, `copper`, `wireless` — case-insensitive)
+2. Excludes link IDs already in `modifiedRouteIdsRef` (live GeoJSON owns those)
+3. Includes only links connected to a visible device
+
+This avoids rendering tens of thousands of off-screen lines while keeping the visible network accurate.
+
+### Drag Behaviour
+
+Three events handle marker dragging:
+
+- `dragstart` — adds all of the device's link IDs to `modifiedRouteIdsRef` and calls `refreshFilters()`, immediately hiding those links from the PMTiles layer
+- `drag` — fires continuously. Updates `dev.lng / dev.lat` and redraws connected links as straight lines via `updateLiveRouteInMap()`. No network calls
+- `dragend` — fires once on release. Posts to `POST /api/route` for each affected link with `link_id` and `link_type`, receives real road coordinates, flips `[lat, lng]` → `[lng, lat]` for GeoJSON, and updates the live source
+
+### `updateLiveRouteInMap(linkId, linkType, coordinates, props)`
+
+Replaces or inserts a feature in `liveRoutesRef.current.features` by `linkId`, then calls `map.getSource('live-routes').setData(...)`. This is the single mutation point for live route state — both drag feedback and post-OSRM updates go through here.
+
+### Clustering
+
+At zoom < 12, devices render as a clustered GeoJSON source with three layers:
+
+- `clusters-outer` — translucent halo circle (colour scales green → amber → red by count)
+- `clusters` — solid inner circle
+- `cluster-count` — abbreviated count label
+
+Clicking a cluster calls `getClusterExpansionZoom()` and `easeTo()` to zoom into it.
 
 ### Icon Sprites (`iconSprite.js`)
 
-At low zoom, devices render as icon sprites registered with MapLibre via `map.addImage()`. Each icon is drawn onto an offscreen HTML `canvas`:
+At low zoom (before clustering was added), devices rendered as icon sprites. The sprite registration code remains and is used as a fallback. Each icon is drawn onto an offscreen HTML `canvas`:
 
 ```
 SVG string → HTMLImageElement → drawImage onto canvas → getImageData → map.addImage()
 ```
 
-The canvas draws a coloured circle background first, then the Lucide icon SVG on top. Images are registered by device type name (`'router'`, `'server'`, etc.) and referenced in the symbol layer via `['get', 'type']`.
-
-Icons use the exact SVG paths from [lucide.dev](https://lucide.dev) to match the high-zoom DOM marker appearance.
-
-### Why `useRef` not `useState`
-
-MapLibre is imperative — it manages its own DOM. Using `useState` would trigger React re-renders that conflict with MapLibre's internal state. `useRef` provides stable storage that persists across renders without triggering them. Three refs are used:
-
-- `mapRef` — the DOM div MapLibre renders into
-- `mapInstanceRef` — the MapLibre map instance
-- `markersRef` — array of DOM marker instances
-
-### Sources and Layers
-
-Each link has a GeoJSON source and a line layer. The source holds coordinate data; the layer defines how to render it. This separation allows updating data (`source.setData()`) without recreating the layer.
-
-```js
-map.addSource(link.id, { type: 'geojson', data: emptyFeature });
-map.addLayer({ id: link.id, type: 'line', source: link.id, paint: {...} });
-map.getSource(link.id).setData(toGeoJSON(coords));  // update data only
-```
-
-Devices use a single shared source (`'devices'`) with a symbol layer (`'devices-circles'`). The source is a `FeatureCollection` of all device points. Device type colours are applied via a MapLibre `match` expression:
-
-```js
-'circle-color': ['match', ['get', 'type'],
-    'core-router', '#ef4444',
-    'router', '#3b82f6',
-    // ...
-]
-```
-
-### Drag Behaviour
-
-Two events handle marker dragging:
-
-- `drag` — fires continuously. Updates `pos[dev.id]` and redraws connected links as straight lines for instant visual feedback. No network calls.
-- `dragend` — fires once on release. Calls `rerouteFor(deviceId)` which fetches real road routes from the backend for all affected links, then rebuilds the devices GeoJSON source to sync circle positions.
-
-### Tooltips
-
-**Device tooltips (low zoom):** MapLibre mouse events on the symbol layer show a `Popup` with device name and type on hover.
-
-**Device tooltips (high zoom):** MapLibre `Popup` attached to each DOM marker via `marker.setPopup()`, shown on click.
-
-**Link tooltips:** MapLibre mouse events on each line layer show a `Popup` with `from → to` and link type on hover.
-
-### GeoJSON Helper (`toGeoJSON.js`)
-
-MapLibre requires data in GeoJSON format. The helper converts the backend's `[[lat, lng], ...]` array to a GeoJSON Feature:
-
-```js
-export function toGeoJSON(coords) {
-    return {
-        type: "Feature",
-        geometry: {
-            type: "LineString",
-            coordinates: coords.map(([lat, lng]) => [lng, lat])
-        }
-    }
-}
-```
-
-Note the coordinate flip — GeoJSON uses `[lng, lat]` (longitude first), opposite of the backend's `[lat, lng]` pairs.
-
 ### Custom Markers (`createMarker.jsx`)
 
-Each device type gets a custom SVG icon rendered inside a coloured circle at high zoom. The marker element is a plain DOM `div` with inline styles and SVG `innerHTML`. MapLibre receives this element via `{ element: el }`.
+Each device type gets a custom SVG icon rendered inside a coloured circle at high zoom. The marker element is a plain DOM `div` with inline styles. MapLibre receives this element via `{ element: el, draggable: true }`.
 
 Tailwind classes are avoided on marker elements to prevent conflicts with MapLibre's CSS transformations.
 
 ### Legend (`Legend.jsx`)
 
-The legend derives unique link types from the `LINKS` array using `reduce`, avoiding hardcoded entries. This means adding a new link type to `networkData.js` automatically appears in the legend.
+The legend derives unique link types from the `LINKS` array using `reduce`, so adding a new link type to `networkData.js` automatically appears in the legend without any other changes.
 
-```js
-const linkTypes = Object.values(
-    LINKS.reduce((acc, cur) => {
-        acc[cur.type] = acc[cur.type] || { type: cur.type, color: cur.color };
-        return acc;
-    }, {})
-);
-```
+### Why `useRef` not `useState`
 
-### Device Colors (`networkData.js`)
+MapLibre is imperative — it manages its own DOM. Using `useState` would trigger React re-renders that conflict with MapLibre's internal state. `useRef` provides stable storage that persists across renders without triggering them. Key refs:
 
-`DEVICE_COLORS` is the single source of truth for device type colours, imported by both `iconSprite.js` (low zoom WebGL) and `DeviceIcon.jsx` (high zoom DOM):
-
-```js
-export const DEVICE_COLORS = {
-  'core-router': '#ef4444',
-  'router':      '#3b82f6',
-  'switch':      '#f59e0b',
-  'edge-router': '#8b5cf6',
-  'server':      '#22c55e',
-};
-```
+- `mapRef` — the DOM div MapLibre renders into
+- `mapInstanceRef` — the MapLibre map instance
+- `markersRef` — array of active DOM marker instances
+- `modifiedRouteIdsRef` — Set of link IDs owned by the live GeoJSON layer
+- `liveRoutesRef` — current live GeoJSON FeatureCollection (avoids stale closure issues)
 
 ---
 
@@ -187,37 +194,72 @@ export const DEVICE_COLORS = {
 
 ### Entry Point (`main.py`)
 
-Creates the FastAPI app, registers CORS middleware, creates database tables, and mounts routers:
+Creates the FastAPI app, registers CORS middleware, creates database tables on startup, and mounts routers:
 
-- `/api` — routing endpoints
+- `/api` — routing and fixture endpoints
 - `/auth` — authentication endpoints
 
-CORS allows requests from `http://localhost:5173` (Vite dev server). In production, update `origins` to the deployed frontend URL.
+CORS allows requests from `http://localhost:5173`. In production, update `origins` to the deployed frontend URL.
 
-### Routing Endpoint (`routers/routes.py`)
+### Routing Endpoints (`routers/routes.py`)
 
-`POST /api/route` accepts two `Point` objects, calls `fetch_route`, and returns a coordinate array. Pydantic validates the request shape automatically — invalid input returns a 422 response without any manual validation code.
+| Method | Endpoint | Description |
+|---|---|---|
+| POST | `/api/route` | Road route between two points; optionally persists to SQLite |
+| GET | `/api/devices` | All devices from `fixtures/devices.json` |
+| GET | `/api/links` | All links from `fixtures/links.json` |
+| GET | `/api/routes/geojson` | All persisted routes as GeoJSON FeatureCollection |
 
-### OSRM Utility (`utils/osrm.py`)
+`POST /api/route` accepts an extended `RouteRequest`:
 
-Calls the OSRM public API with a 6-second timeout. Parses the GeoJSON geometry from the response and flips coordinates from `[lng, lat]` to `[lat, lng]`. Falls back to a straight line between the two input points on any error.
-
+```python
+class RouteRequest(BaseModel):
+  a: Point
+  b: Point
+  link_id: str | None = None
+  link_type: str | None = None
 ```
-fetch_route(a, b):
-  check cache → hit → return cached coords
-  miss → call OSRM → parse coords → store in cache → return coords
-  error → return [[a.lat, a.lng], [b.lat, b.lng]]
-```
+
+When `link_id` is provided, the route is upserted into the `routes` SQLite table. This enables the frontend to restore all previously dragged routes on next page load via `GET /api/routes/geojson`.
 
 ### Database (`database.py`)
 
-SQLAlchemy is configured with SQLite for development. Three objects are exported:
+SQLAlchemy is configured with SQLite. Two models are exported:
 
-- `engine` — the database connection
-- `SessionLocal` — session factory (one session per request)
-- `Base` — declarative base class for models
+**`User`** (auth):
 
-`Base.metadata.create_all(bind=engine)` in `main.py` creates tables on startup if they don't exist. For production schema changes, use Alembic migrations instead.
+| Field | Type | Notes |
+|---|---|---|
+| id | Integer | Primary key |
+| email | String | Unique, not null |
+| password | String | bcrypt hash |
+| role | String | `noc_engineer`, `planner`, `technician` |
+| created_at | DateTime | UTC |
+
+**`Route`** (persisted drag results):
+
+| Field | Type | Notes |
+|---|---|---|
+| id | String | Primary key — `"{from_id}-{to_id}"` |
+| from_id | String | Source device ID |
+| to_id | String | Target device ID |
+| link_type | String | `fiber`, `copper`, `wireless` |
+| coords | JSON | `[[lat, lng], ...]` array |
+| updated_at | DateTime | UTC, updated on each drag |
+
+`Base.metadata.create_all(bind=engine)` in `main.py` creates both tables on startup if they don't exist.
+
+### OSRM Utility (`utils/osrm.py`)
+
+Calls the local OSRM Docker instance at `localhost:5000` with a 6-second timeout. Parses GeoJSON geometry and flips coordinates from `[lng, lat]` to `[lat, lng]`. Falls back to a straight line between the two points on any error.
+
+```
+fetch_route(a, b):
+  check cache → hit → move to end (LRU) → return cached coords
+  miss → GET localhost:5000/route/v1/driving/...
+       → parse coords → evict LRU if cache full → store → return coords
+  error → return [[a.lat, a.lng], [b.lat, b.lng]]
+```
 
 ---
 
@@ -247,19 +289,9 @@ Protected request (future):
   → invalid → 401
 ```
 
-### User Model
-
-| Field | Type | Notes |
-|---|---|---|
-| id | Integer | Primary key, auto-increment |
-| email | String | Unique, not null |
-| password | String | bcrypt hash, never plain text |
-| role | String | `noc_engineer`, `planner`, `technician` |
-| created_at | DateTime | UTC, set on insert |
-
 ### JWT
 
-Tokens are signed with HS256 using a server-side secret key. The payload contains:
+Tokens are signed with HS256 using a server-side secret key loaded from the `SECRET_KEY` environment variable (falls back to a dev placeholder). The payload contains:
 
 ```json
 {
@@ -269,7 +301,7 @@ Tokens are signed with HS256 using a server-side secret key. The payload contain
 }
 ```
 
-Tokens expire after 30 minutes. `verify_token` raises `JWTError` on invalid or expired tokens.
+Tokens expire after 30 minutes.
 
 ### Password Security
 
@@ -281,7 +313,7 @@ Passwords are hashed with bcrypt via `passlib`. Plain text passwords are never s
 
 ### OSRM
 
-The app uses the OSRM public demo server at `router.project-osrm.org`. OSRM uses Dijkstra's algorithm on OpenStreetMap road data to return the fastest driving route between two points.
+The app uses a locally hosted OSRM instance running in Docker on port 5000. OSRM uses Dijkstra's algorithm on OpenStreetMap road data to return the fastest driving route between two points.
 
 The URL format is:
 ```
@@ -290,29 +322,72 @@ The URL format is:
 
 Note: OSRM takes longitude before latitude, opposite of most mapping conventions.
 
-### In-Memory Cache
+### In-Memory LRU Cache
 
 ```python
-_cache = {}  # module-level, persists across requests
+_cache = OrderedDict()  # module-level, persists across requests
+MAX_CACHE = 10_000
 
 key = f"{a.lat},{a.lng},{b.lat},{b.lng}"
 
 if key in _cache:
-    return _cache[key]          # cache hit, no OSRM call
+    _cache.move_to_end(key)   # promote to most-recently-used
+    return _cache[key]
 
 result = call_osrm(a, b)
-_cache[key] = result            # store on success
+
+if len(_cache) >= MAX_CACHE:
+    _cache.popitem(last=False) # evict least-recently-used
+
+_cache[key] = result
 return result
 ```
 
-The cache key combines all four coordinate values. The same route requested from different directions (A→B vs B→A) produces different keys — intentional since road routes are not always reversible.
+The cache key combines all four coordinate values. A→B and B→A produce different keys — intentional since road routes are not always reversible.
 
-**Limitations of in-memory cache:**
+**Limitations:**
 - Lost on server restart
 - Not shared across multiple server instances
-- No eviction — grows unbounded over time
+- Bounded at 10,000 entries with LRU eviction
 
-**Production upgrade path:** Replace the dict with Redis. The interface is nearly identical and Redis survives restarts and scales horizontally.
+**Production upgrade path:** Replace `OrderedDict` with Redis. The interface is nearly identical and Redis survives restarts and scales horizontally.
+
+---
+
+## Static vs Live Routes
+
+The map renders two independent route layers that work in tandem:
+
+### PMTiles layer (`links-vector` / `links-*`)
+
+A pre-built `dummy-network.pmtiles` file in `frontend/public/` contains road-routed GeoJSON for all ~60,000 links, built via `backend/fixtures/generate-geojson.js` and compiled with `tippecanoe`. These are rendered as vector tile layers and are visible by default for the current viewport.
+
+### Live GeoJSON layer (`live-routes` / `live-*`)
+
+A mutable in-memory GeoJSON `FeatureCollection` held in `liveRoutesRef`. On page load it is populated from `GET /api/routes/geojson` (all previously dragged routes from SQLite). During drag it updates in real time. After `dragend` it updates with the real OSRM route.
+
+### Handoff logic
+
+When a device is dragged:
+
+1. `dragstart` — adds affected link IDs to `modifiedRouteIdsRef`
+2. `refreshFilters()` rebuilds the PMTiles filter to exclude those IDs
+3. Live GeoJSON layer now owns those links exclusively
+4. No link is ever rendered by both layers simultaneously
+
+This handoff is permanent for the session — once a link is in `modifiedRouteIdsRef`, the PMTiles layer never renders it again. On next page load, `GET /api/routes/geojson` pre-populates `liveRoutesRef` so previously dragged routes are immediately shown in the live layer.
+
+### Generating PMTiles (one-time / on fixture change)
+
+```bash
+# 1. Run local OSRM on port 5000
+# 2. From backend/fixtures/
+node generate-geojson.js   # outputs dummy-routes.geojson
+
+# 3. From backend/
+python scripts/export_pmtiles.py
+# requires tippecanoe installed; outputs frontend/public/dummy-network.pmtiles
+```
 
 ---
 
@@ -327,69 +402,57 @@ Tests use FastAPI's `TestClient` which sends requests directly to the app withou
 ```python
 min_lat = min(a["lat"], b["lat"]) - 1.0
 max_lat = max(a["lat"], b["lat"]) + 1.0
-min_lng = min(a["lng"], b["lng"]) - 1.0
-max_lng = max(a["lng"], b["lng"]) + 1.0
 ```
 
-This works for any coordinates worldwide — a test for Tokyo uses Tokyo's bounding box, not Dhaka's.
+This works for any coordinates worldwide.
 
-**Cache test** mocks OSRM using `unittest.mock.patch` to replace `httpx.AsyncClient` with a fake returning a valid OSRM response. After two identical requests, `call_count == 1` proves OSRM was only called once. The mock must return `{"code": "Ok"}` so the cache storage branch is reached — `InvalidUrl` would hit the fallback, bypassing the cache.
+**Cache test** mocks OSRM using `unittest.mock.patch` to replace `httpx.AsyncClient` with a fake. After two identical requests, `call_count == 1` proves OSRM was only called once.
 
 ### Frontend Performance Tests (Playwright)
 
 Playwright controls a real Chromium browser. Tests access the MapLibre map instance via `window.__map`, exposed in `NetworkMap.jsx` under `import.meta.env.DEV`.
 
-**WebGL render tests** inject N fake devices into the `devices` GeoJSON source and measure time until the next `render` event fires:
-
-```js
-map.getSource('devices').setData({ type: 'FeatureCollection', features });
-map.once('render', () => resolve(performance.now() - start));
-```
-
-**Route load test** polls all link sources until their coordinate arrays are non-empty, measuring total time from page navigation to all routes drawn.
-
-**DOM marker test** zooms to level 14, injects 10,000 markers via `maplibregl.Marker`, and measures time until the next animation frame.
-
-```
-Results (measured):
-  100 devices (WebGL):    26ms   / 100ms threshold
-  1,000 devices (WebGL):  18ms   / 200ms threshold
-  10,000 devices (WebGL): 85ms   / 500ms threshold
-  All routes on load:     1544ms / 8000ms threshold
-```
+| Test | Threshold | Notes |
+|---|---|---|
+| 100 devices (WebGL) | < 100ms | GeoJSON source setData + render event |
+| 1,000 devices (WebGL) | < 200ms | |
+| 10,000 devices (WebGL) | < 500ms | |
+| 60,000 devices load | < 5000ms | Polls source until features populated |
+| 50,000 DOM markers | < 5000ms | Zoom 14, injects raw Marker instances |
+| 60,000 devices render | < 500ms | triggerRepaint + render event timing |
 
 ---
 
 ## Data Structures
 
-### DEVICES
+### DEVICES (fixture)
 
 ```js
 {
-  id: string,       // unique identifier
-  name: string,     // display name for tooltip
-  lat: number,      // latitude
-  lng: number,      // longitude
+  id: string,       // e.g. "router-1"
+  name: string,     // display name
+  lat: number,
+  lng: number,
   type: string      // 'core-router' | 'router' | 'switch' | 'edge-router' | 'server'
 }
 ```
 
-### LINKS
+### LINKS (fixture)
 
 ```js
 {
-  id: string,       // unique identifier, used as MapLibre source/layer id
+  id: string,       // e.g. "l1"
   from: string,     // device id
   to: string,       // device id
   type: string,     // 'fiber' | 'copper' | 'wireless'
-  color: string     // hex color for the line
+  color: string     // hex color
 }
 ```
 
-### Route Response
+### Route response (`POST /api/route`)
 
 ```python
-[[lat, lng], [lat, lng], ...]  # array of coordinate pairs
+[[lat, lng], [lat, lng], ...]
 ```
 
 ### GeoJSON Device Feature
@@ -402,11 +465,12 @@ Results (measured):
 }
 ```
 
-### GeoJSON Link Feature
+### GeoJSON Link Feature (live layer)
 
 ```json
 {
   "type": "Feature",
+  "properties": { "id": "l1", "from": "core-1", "to": "dist-1", "type": "fiber" },
   "geometry": {
     "type": "LineString",
     "coordinates": [[lng, lat], [lng, lat], ...]
@@ -419,25 +483,31 @@ Results (measured):
 ## Key Design Decisions
 
 **Why MapLibre over Leaflet?**
-MapLibre uses WebGL for rendering (faster, smoother at scale) and vector tiles (more data, better styling control). Leaflet uses raster tiles — less flexible and heavier at scale. Performance tests confirm MapLibre renders 10,000 devices in 85ms.
+MapLibre uses WebGL for rendering and vector tiles for data. Leaflet uses raster tiles and SVG/Canvas for markers — heavier at scale. Performance tests confirm MapLibre renders 10,000 devices in ~85ms.
+
+**Why PMTiles for static routes?**
+A single `.pmtiles` file replaces tens of thousands of individual GeoJSON sources and layers. It is served as a static file, requires no backend involvement, and MapLibre streams only the tiles needed for the current viewport via range requests.
+
+**Why a hybrid PMTiles + live GeoJSON approach?**
+PMTiles efficiently serves the static 60,000-link dataset. The live GeoJSON layer handles the small subset of routes that have been modified by dragging, with real-time updates. Trying to do either job with the other technology would be worse: live GeoJSON can't efficiently serve 60,000 features; PMTiles can't be mutated at runtime.
 
 **Why the hybrid zoom approach?**
-DOM markers are draggable and support Lucide icons but break at scale. WebGL layers scale to 100,000+ devices but don't support native drag. Switching at zoom 13 (street level) gives NOC engineers a fast overview at low zoom and full interactivity when zoomed in to a specific area.
+DOM markers are draggable and support Lucide icons but degrade past ~1,000 nodes. WebGL cluster layers scale to 100,000+ devices and give NOC engineers a spatial overview at low zoom. Switching at zoom 12 (district level) provides a fast overview and full interactivity when zoomed in.
 
 **Why FastAPI over Express or Django?**
 FastAPI is async-native (important for concurrent OSRM calls), generates API docs automatically, and uses Python type hints for validation via Pydantic. Django is too heavy for a simple API layer.
 
-**Why SQLite over PostgreSQL for auth?**
-SQLite requires zero configuration for development. The ORM (SQLAlchemy) abstracts the database, so switching to PostgreSQL for production requires changing one connection string.
+**Why SQLite for both auth and route persistence?**
+SQLite requires zero configuration for development. SQLAlchemy abstracts the database so switching to PostgreSQL requires changing one connection string. Route persistence (dragged routes surviving page reload) is a lightweight workload well suited to SQLite.
 
-**Why in-memory cache over Redis?**
-In-memory is zero-dependency and sufficient for a single-instance dev server. The cache interface is abstracted in `osrm.py` so swapping to Redis later is a localised change.
+**Why in-memory LRU cache over Redis?**
+In-memory is zero-dependency and sufficient for a single-instance dev server. The `OrderedDict`-based LRU is bounded at 10,000 entries to prevent unbounded growth. Swapping to Redis is a localised change in `osrm.py`.
 
 **Why JWT over sessions?**
-JWTs are stateless — the server doesn't store session data. This makes horizontal scaling simpler and fits the REST API model well.
+JWTs are stateless — the server stores no session data. This makes horizontal scaling simpler and fits the REST API model.
 
 **Why `useRef` for the map instance?**
-MapLibre manages its own DOM imperatively. React's `useState` would cause re-renders that conflict with MapLibre's internal state. `useRef` provides stable storage that persists across renders without triggering them.
+MapLibre manages its own DOM imperatively. `useState` would cause re-renders that conflict with MapLibre's internal state. `useRef` provides stable storage across renders without triggering them.
 
-**Why expose `window.__map` in DEV?**
-Playwright runs in a separate browser context from the React app. Exposing the map instance on `window` under `import.meta.env.DEV` lets performance tests access MapLibre directly without modifying production code.
+**Why `liveRoutesRef` instead of deriving state?**
+The live route FeatureCollection is mutated frequently (every drag frame). Holding it in a ref avoids React re-renders on every mouse move while still allowing `map.getSource('live-routes').setData()` to update the map imperatively.
