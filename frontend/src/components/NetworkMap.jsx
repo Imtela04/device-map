@@ -30,11 +30,20 @@ export default function NetworkMap() {
 
     map.on('load', async () => {
 
-      const toGeoJSONFeature = (device) => ({
-        type: 'Feature',
-        geometry: { type: 'Point', coordinates: [device.lng, device.lat] },
-        properties: { ...device }
-      });
+      const toGeoJSONFeature = (device) => {
+        // Standardize the type specifically for the color matcher
+        let renderType = 'Access';
+        const t = (device.type || '').toLowerCase();
+        if (t.includes('core')) renderType = 'Core Router';
+        else if (t.includes('edge')) renderType = 'Edge Router';
+        else if (t.includes('olt')) renderType = 'OLT';
+
+        return {
+          type: 'Feature',
+          geometry: { type: 'Point', coordinates: [device.lng, device.lat] },
+          properties: { ...device, renderType } // Inject safe type
+        };
+      };
 
       const [devices, links, dbRoutes] = await Promise.all([
         fetch('http://localhost:8000/api/devices').then(r => r.json()),
@@ -61,15 +70,21 @@ export default function NetworkMap() {
         linksByDevice[toId].push(l);
       });
 
-      const mainTypes = ['core router', 'edge router', 'olt'];
       const accessDevices = [];
       mainDevicesRef.current = []; 
       
       devices.forEach(d => {
-        const normalizedType = (d.type || '').toLowerCase().trim();
-        if (mainTypes.includes(normalizedType)) mainDevicesRef.current.push(d);
-        else accessDevices.push(d);
+        const typeStr = (d.type || '').toLowerCase();
+        
+        // Fuzzy matching: catches "Core Router", "Router-Core", "Edge", etc.
+        if (typeStr.includes('core') || typeStr.includes('edge') || typeStr.includes('olt')) {
+          mainDevicesRef.current.push(d);
+        } else {
+          accessDevices.push(d);
+        }
       });
+      
+      console.log(`🔍 DEVICES SORTED: Main Devices (${mainDevicesRef.current.length}), Access Devices (${accessDevices.length})`);
 
       map.addSource('devices', {
         type: 'geojson',
@@ -84,18 +99,6 @@ export default function NetworkMap() {
         data: { type: 'FeatureCollection', features: mainDevicesRef.current.map(toGeoJSONFeature) }
       });
 
-      map.addLayer({
-        id: 'unclustered-main-devices',
-        type: 'circle',
-        source: 'main-devices',
-        maxzoom: 12,
-        paint: {
-          'circle-color': ['match', ['get', 'type'], 'Core Router', '#ef4444', 'Edge Router', '#8b5cf6', 'OLT', '#14b8a6', '#eab308'],
-          'circle-radius': 8,
-          'circle-stroke-width': 2,
-          'circle-stroke-color': '#ffffff'
-        }
-      });
 
       const popup = new maplibregl.Popup({ closeButton: false, closeOnClick: false });
       
@@ -169,6 +172,20 @@ export default function NetworkMap() {
         layout: { 'text-field': '{point_count_abbreviated}', 'text-size': 11, 'text-font': ['Open Sans Bold', 'Arial Unicode MS Bold'] },
         paint: { 'text-color': '#ffffff' }
       });
+
+      map.addLayer({
+        id: 'unclustered-main-devices',
+        type: 'circle',
+        source: 'main-devices',
+        maxzoom: 12,
+        paint: {
+          'circle-color': ['match', ['get', 'renderType'], 'Core Router', '#ef4444', 'Edge Router', '#8b5cf6', 'OLT', '#14b8a6', '#eab308'],
+          'circle-radius': 8,
+          'circle-stroke-width': 2,
+          'circle-stroke-color': '#ffffff'
+        }
+      });
+
 
       const updateClusterSource = () => {
         const source = map.getSource('devices');
