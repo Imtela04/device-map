@@ -21,6 +21,10 @@ const deviceIcons = {
     color: '#22c55e',
     svg: `<rect width="20" height="8" x="2" y="2" rx="2" ry="2"/><rect width="20" height="8" x="2" y="14" rx="2" ry="2"/><line x1="6" x2="6.01" y1="6" y2="6"/><line x1="6" x2="6.01" y1="18" y2="18"/>`
   },
+  'olt': {
+    color: '#14b8a6',
+    svg: `<rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8"/><path d="M12 17v4"/><path d="M2 12h20"/>`,
+  },
 };
 
 
