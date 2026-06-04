@@ -89,9 +89,7 @@ device-maps/
     ├── scripts/
     │   ├── seed_db.py            # Database seeding
     │   ├── generate_fixtures.py  # Generates devices.json + links.json
-    │   └── export_pmtiles.py     # Exports routes GeoJSON → PMTiles via tippecanoe
-    └── tests/
-        └── test_routes.py        # Route sanity and cache tests
+    │   └── export_pmtiles.py     # Exports routes GeoJSON → PMTiles via 
 ```
 
 ---
