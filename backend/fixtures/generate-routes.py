@@ -38,9 +38,9 @@ async def get_road_route(client, from_dev, to_dev, link):
 
 async def build_geojson():
     print("Loading database fixtures...")
-    with open('fixtures/devices.json', 'r', encoding='utf-8') as f:
+    with open('devices.json', 'r', encoding='utf-8') as f:
         devices = json.load(f)
-    with open('fixtures/links.json', 'r', encoding='utf-8') as f:
+    with open('links.json', 'r', encoding='utf-8') as f:
         links = json.load(f)
 
     device_map = {str(dev['id']): dev for dev in devices}

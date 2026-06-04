@@ -68,10 +68,15 @@ def generate_links(devices):
 
     print("Connecting network topologically (calculating spatial distances)...")
 
-    # 1. Mesh the Core Routers together
-    for i, dev in enumerate(by_type['core-router']):
-        if i > 0:
-            add_link(dev['id'], by_type['core-router'][i-1]['id'])
+    # 1. Full Mesh the Core Routers together
+    core_routers = by_type['core-router']
+    num_cores = len(core_routers)
+    
+    for i in range(num_cores):
+        # Start from i+1 to avoid connecting a router to itself 
+        # and to prevent duplicating links (e.g., A->B and B->A)
+        for j in range(i + 1, num_cores):
+            add_link(core_routers[i]['id'], core_routers[j]['id'])
 
     # 2. Edge Routers → 1 nearest Core Router
     for dev in by_type['edge-router']:

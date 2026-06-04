@@ -20,3 +20,6 @@ playwright-report/
 *.osrm
 *.pbf
 *bangladesh*
+
+#fixtures
+*.json
