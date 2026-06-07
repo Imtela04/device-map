@@ -144,7 +144,7 @@ export default function NetworkMap() {
           type: 'line', 
           source: sourceId, 
           minzoom: 11.5, 
-          paint: { 'line-color': '#94a3b850', 'line-width': 4 }
+          paint: { 'line-color': '#f804bb3f', 'line-width': 4 }
         };
         if (sourceLayer) layerConfig['source-layer'] = sourceLayer;
 
@@ -233,11 +233,41 @@ export default function NetworkMap() {
       });
       
       map.on('click', 'unclustered-devices', (e) => {
-          customerPopup.remove();
-          focusedDeviceIdRef.current = e.features[0].properties.id;
+          // 1. Correctly extract the id from the feature properties
+          const featureId = e.features[0].properties.id; 
+          
+          popup.remove();
+          
+          // 2. Use the extracted featureId variable
+          focusedDeviceIdRef.current = featureId;
           showMarkers(); 
-      });
+          
+          // 3. Find the full device object using devMap
+          const dev = devMap[String(featureId)];
+          if (dev) showStatsPopup(dev);
+      });      
 
+      map.on('click', 'unclustered-main-devices', (e) => {
+        const featureId = e.features[0].properties.id;
+        const coords = e.features[0].geometry.coordinates.slice();
+        const dev = devMap[String(featureId)];
+
+        popup.remove();
+        focusedDeviceIdRef.current = featureId;
+
+        // Zoom to the device first — zoomend will call showMarkers() to
+        // spawn the HTML marker, then moveend fires after so we show the popup.
+        map.easeTo({ center: coords, zoom: Math.max(map.getZoom(), 13) });
+
+        map.once('moveend', () => {
+          showMarkers();               // ensures marker exists at new zoom
+          if (dev) showStatsPopup(dev);
+        });
+      });
+      map.on('mouseenter', 'unclustered-main-devices', () => { map.getCanvas().style.cursor = 'pointer'; });
+      map.on('mouseleave', 'unclustered-main-devices', () => { map.getCanvas().style.cursor = ''; });
+  
+      
       map.addLayer({
         id: 'main-clusters', type: 'circle', source: 'main-devices', filter: ['has', 'point_count'],
         paint: { 'circle-color': '#7c3aed', 'circle-radius': ['step', ['get', 'point_count'], 13, 10, 17, 50, 21], 'circle-stroke-width': 2, 'circle-stroke-color': '#ffffff' },
@@ -258,10 +288,8 @@ export default function NetworkMap() {
         paint: { 'text-color': '#1e293b', 'text-halo-color': '#ffffff', 'text-halo-width': 1.5 },
       });
 
-
       // --- CENTRALIZED STATS POPUP ---
       function showStatsPopup(dev) {
-
         let statsHtml = '';
         const connectedLinks = linksByDevice[String(dev.id)] || [];
 
@@ -297,6 +325,17 @@ export default function NetworkMap() {
               <span style="color:#64748b;">Path Redundancy:</span>
               <strong style="color:#10b981;">Active / Active</strong>
             </div>`;
+        } else {
+          // CUSTOMER ROUTER STATS
+          statsHtml = `
+            <div style="display:flex; justify-content:space-between; margin-top:6px; font-size:12px;">
+              <span style="color:#64748b;">Connection:</span>
+              <strong style="color:#10b981;">Online</strong>
+            </div>
+            <div style="display:flex; justify-content:space-between; margin-top:4px; font-size:12px;">
+              <span style="color:#64748b;">Plan:</span>
+              <strong style="color:#3b82f6;">1 Gbps Fiber</strong>
+            </div>`;
         }
 
         new maplibregl.Popup({ offset: 25, closeButton: true, closeOnClick: true })
@@ -314,32 +353,6 @@ export default function NetworkMap() {
           `)
           .addTo(map);
       }
-
-      // Handle click on zoomed-out layer symbols
-      map.on('click', 'unclustered-main-devices', (e) => {
-        const p = e.features[0].properties;
-        const dev = devMap[String(p.id)]; // Get real device data
-        
-        focusedDeviceIdRef.current = dev.id;
-        if (map.getZoom() >= 12) { showMarkers(); }
-        else { map.easeTo({ center: e.features[0].geometry.coordinates, zoom: 13 }); }
-
-        showStatsPopup(dev); // Trigger detailed stats!
-      });
-      
-      map.on('click', 'main-clusters', async (e) => {
-        const features = map.queryRenderedFeatures(e.point, { layers: ['main-clusters'] });
-        const clusterId = features[0].properties.cluster_id;
-        const zoom = await map.getSource('main-devices').getClusterExpansionZoom(clusterId);
-        map.easeTo({ center: features[0].geometry.coordinates, zoom });
-      });
-      map.on('mouseenter', 'main-clusters', () => { map.getCanvas().style.cursor = 'pointer'; });
-      map.on('mouseleave', 'main-clusters', () => { map.getCanvas().style.cursor = ''; });
-
-      const updateClusterSource = () => {
-        const source = map.getSource('devices');
-        if (source) source.setData({ type: 'FeatureCollection', features: accessDevices.map(toGeoJSONFeature) });
-      };
 
       // --- STATE & ROUTE MANAGEMENT ---
 
@@ -364,6 +377,15 @@ export default function NetworkMap() {
         liveRoutesRef.current.features = features;
         queueLiveRouteUpdate();
         modifiedRouteIdsRef.current.add(safeId);
+      }
+
+      function updateClusterSource() {
+        if (map.getSource('main-devices')) {
+          map.getSource('main-devices').setData({
+            type: 'FeatureCollection',
+            features: mainDevicesRef.current.map(toGeoJSONFeature),
+          });
+        }
       }
 
       function refreshFilters() {
@@ -455,7 +477,8 @@ export default function NetworkMap() {
         }
 
         for (const [id, marker] of activeMarkersRef.current.entries()) {
-            if (!visibleIds.has(id) || !INFRA.has((devMap[id]?.type || '').toLowerCase())) {
+            const isFocused = id === String(focusedDeviceIdRef.current);
+            if (!visibleIds.has(id) || (!INFRA.has(devMap[id]?.safeType) && !isFocused)) {
                 marker.remove();
                 activeMarkersRef.current.delete(id);
             }
@@ -463,9 +486,10 @@ export default function NetworkMap() {
 
         devicesToRender.forEach(dev => {
           const id = String(dev.id);
-          const isInfra = INFRA.has((dev.type || '').toLowerCase());
-          
-          if (!isInfra) return; 
+          const isInfra = INFRA.has(dev.safeType);
+          const isFocused = id === String(focusedDeviceIdRef.current);
+
+          if (!isInfra && !isFocused) return;          
           
           if (!activeMarkersRef.current.has(id)) {
             const marker = createMarker(dev, map);  
@@ -480,11 +504,19 @@ export default function NetworkMap() {
             });
 
             marker.on('dragstart', () => {
-               const affected = linksByDevice[String(dev.id)] || [];
-               affected.forEach(l => modifiedRouteIdsRef.current.add(String(l.id)));
-               refreshFilters(); 
+              const affected = linksByDevice[String(dev.id)] || [];
+              affected.forEach(l => modifiedRouteIdsRef.current.add(String(l.id)));
+              refreshFilters();
+              // Hide only the focused dot; keep neighbor dots visible
+              if (!INFRA.has(dev.safeType) && map.getLayer('unclustered-devices')) {
+                const neighbourIds = (linksByDevice[String(dev.id)] || []).map(l =>
+                  String(l.from) === String(dev.id) ? String(l.to) : String(l.from)
+                );
+                map.setFilter('unclustered-devices', ['all', ['!', ['has', 'point_count']],
+                  ['match', ['to-string', ['get', 'id']], neighbourIds.length ? neighbourIds : ['__none__'], true, false]
+                ]);
+              }
             });
-
             marker.on('drag', () => {
               const coords = marker.getLngLat();
               dev.lng = coords.lng;
@@ -546,6 +578,14 @@ export default function NetworkMap() {
                   }
                 }
               }));
+              // Push updated coords back into the GL source so the dot moves
+              if (!INFRA.has(dev.safeType) && map.getSource('devices')) {
+                map.getSource('devices').setData({
+                  type: 'FeatureCollection',
+                  features: devices.filter(d => !INFRA.has(d.safeType)).map(toGeoJSONFeature),
+                });
+              }
+              refreshFilters(); // restores the focusedSet filter — dot reappears at new position
               updateClusterSource();
             });
           }
@@ -597,6 +637,16 @@ export default function NetworkMap() {
         const zoom = await map.getSource('devices').getClusterExpansionZoom(clusterId);
         map.easeTo({ center: features[0].geometry.coordinates, zoom });
       });
+
+      map.on('click', 'main-clusters', async (e) => {
+        const features = map.queryRenderedFeatures(e.point, { layers: ['main-clusters'] });
+        const clusterId = features[0].properties.cluster_id;
+        const zoom = await map.getSource('main-devices').getClusterExpansionZoom(clusterId);
+        map.easeTo({ center: features[0].geometry.coordinates, zoom });
+      });
+
+      map.on('mouseenter', 'main-clusters', () => { map.getCanvas().style.cursor = 'pointer'; });
+      map.on('mouseleave', 'main-clusters', () => { map.getCanvas().style.cursor = ''; });
 
       map.on('mouseenter', 'clusters-outer', () => { map.getCanvas().style.cursor = 'pointer'; });
       map.on('mouseleave', 'clusters-outer', () => { map.getCanvas().style.cursor = ''; });
