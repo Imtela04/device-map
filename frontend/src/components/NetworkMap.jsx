@@ -143,7 +143,7 @@ export default function NetworkMap() {
           id: layerId, 
           type: 'line', 
           source: sourceId, 
-          minzoom: 11.5, 
+          minzoom: 10, 
           paint: { 'line-color': '#f804bb3f', 'line-width': 4 }
         };
         if (sourceLayer) layerConfig['source-layer'] = sourceLayer;
@@ -222,7 +222,7 @@ export default function NetworkMap() {
 
       // --- VISUAL HIERARCHY FOR CUSTOMER DOTS ---
       map.addLayer({
-        id: 'unclustered-devices', type: 'circle', source: 'devices', filter: ['!', ['has', 'point_count']],
+        id: 'unclustered-devices', type: 'circle', source: 'devices', filter: ['!', ['has', 'point_count']], cursor: 'pointer',
         paint: {
           'circle-color': '#f63bbe', 
           'circle-radius': 4.5,
@@ -441,17 +441,35 @@ export default function NetworkMap() {
 
         if (focusId) {
           const connectedLinks = linksByDevice[String(focusId)] || [];
-          const neighborIds = connectedLinks.map(l => String(l.from) === String(focusId) ? String(l.to) : String(l.from));
-          devicesToRender = devices.filter(d => String(d.id) === String(focusId) || neighborIds.includes(String(d.id)));
+          const neighborIds = new Set(
+            connectedLinks.map(l => String(l.from) === String(focusId) ? String(l.to) : String(l.from))
+          );
+          neighborIds.add(String(focusId));
+          devicesToRender = devices.filter(d => neighborIds.has(String(d.id)));
         } else {
-          devicesToRender = devices.filter(dev => dev.lng >= bounds.getWest() && dev.lng <= bounds.getEast() && dev.lat >= bounds.getSouth() && dev.lat <= bounds.getNorth());
+          // Only infra devices get HTML markers — no need to scan 60k customers
+          devicesToRender = mainDevicesRef.current.filter(dev =>
+            dev.lng >= bounds.getWest() && dev.lng <= bounds.getEast() &&
+            dev.lat >= bounds.getSouth() && dev.lat <= bounds.getNorth()
+          );
         }
-
         ['links', 'live'].forEach(prefix => { if (map.getLayer(`${prefix}-generic`)) map.setLayoutProperty(`${prefix}-generic`, 'visibility', 'visible'); });
         refreshFilters();
 
         const visibleIds = new Set(devicesToRender.map(d => String(d.id)));
-        const candidates = links.filter(l => (visibleIds.has(String(l.from)) || visibleIds.has(String(l.to))) && !fetchedRouteIdsRef.current.has(String(l.id)));
+
+        // Walk linksByDevice (already indexed) instead of scanning all 60k+ links
+        const seenLinkIds = new Set();
+        const candidates = [];
+        for (const id of visibleIds) {
+          for (const link of (linksByDevice[id] || [])) {
+            const lid = String(link.id);
+            if (!seenLinkIds.has(lid) && !fetchedRouteIdsRef.current.has(lid)) {
+              seenLinkIds.add(lid);
+              candidates.push(link);
+            }
+          }
+        }
 
         const infraLinks = candidates.filter(l => {
             const fType = (devMap[String(l.from)]?.type || '').toLowerCase();
@@ -459,140 +477,32 @@ export default function NetworkMap() {
             return INFRA.has(fType) || INFRA.has(tType);
         }).slice(0, 20);
 
-        if (infraLinks.length) {
-          infraLinks.forEach(l => fetchedRouteIdsRef.current.add(String(l.id)));
-          Promise.all(infraLinks.map(async (link) => {
-            const from = devMap[String(link.from)], to = devMap[String(link.to)];
-            if (!from || !to) return;
-            try {
-              const res = await fetch('http://localhost:8000/api/route', {
-                method: 'POST', headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ a: { lat: from.lat, lng: from.lng }, b: { lat: to.lat, lng: to.lng }, link_id: `${link.from}-${link.to}`, link_type: link.type || 'generic' }),
-              });
-              if (!res.ok) throw new Error(res.status);
-              const coords = await res.json();
-              updateLiveRouteInMap(link.id, link.type || 'generic', coords.map(([lat, lng]) => [lng, lat]), { from: link.from, to: link.to, fromName: from.name, toName: to.name });
-            } catch { updateLiveRouteInMap(link.id, 'generic', [[from.lng, from.lat], [to.lng, to.lat]], { from: link.from, to: link.to, fromName: from.name, toName: to.name }); }
-          })).then(() => refreshFilters());
-        }
-
-        for (const [id, marker] of activeMarkersRef.current.entries()) {
-            const isFocused = id === String(focusedDeviceIdRef.current);
-            if (!visibleIds.has(id) || (!INFRA.has(devMap[id]?.safeType) && !isFocused)) {
-                marker.remove();
-                activeMarkersRef.current.delete(id);
-            }
-        }
-
-        devicesToRender.forEach(dev => {
-          const id = String(dev.id);
-          const isInfra = INFRA.has(dev.safeType);
-          const isFocused = id === String(focusedDeviceIdRef.current);
-
-          if (!isInfra && !isFocused) return;          
-          
-          if (!activeMarkersRef.current.has(id)) {
-            const marker = createMarker(dev, map);  
-            marker.addTo(map);
-            activeMarkersRef.current.set(id, marker);
-
-            marker.getElement().addEventListener('click', (e) => {
-              e.stopPropagation();
-              focusedDeviceIdRef.current = dev.id;
-              showMarkers(); 
-              showStatsPopup(dev); // Trigger detailed stats!
-            });
-
-            marker.on('dragstart', () => {
-              const affected = linksByDevice[String(dev.id)] || [];
-              affected.forEach(l => modifiedRouteIdsRef.current.add(String(l.id)));
-              refreshFilters();
-              // Hide only the focused dot; keep neighbor dots visible
-              if (!INFRA.has(dev.safeType) && map.getLayer('unclustered-devices')) {
-                const neighbourIds = (linksByDevice[String(dev.id)] || []).map(l =>
-                  String(l.from) === String(dev.id) ? String(l.to) : String(l.from)
-                );
-                map.setFilter('unclustered-devices', ['all', ['!', ['has', 'point_count']],
-                  ['match', ['to-string', ['get', 'id']], neighbourIds.length ? neighbourIds : ['__none__'], true, false]
-                ]);
-              }
-            });
-            marker.on('drag', () => {
-              const coords = marker.getLngLat();
-              dev.lng = coords.lng;
-              dev.lat = coords.lat;
-
-              const affected = linksByDevice[String(dev.id)] || [];
-              const dragFeatures = [];
-
-              affected.forEach(link => {
-                const isFrom = String(link.from) === String(dev.id);
-                const otherDevId = isFrom ? String(link.to) : String(link.from);
-                const otherDev = devMap[otherDevId];
-                
-                if (otherDev) {
-                  const isOtherDevInfra = INFRA.has(otherDev.safeType);
-                  const isThisDevInfra = INFRA.has(dev.safeType);
-
-                  if ((isThisDevInfra && isOtherDevInfra) || affected.length < 15) {
-                      dragFeatures.push({
-                        type: 'Feature', properties: { id: link.id },
-                        geometry: { type: 'LineString', coordinates: isFrom ? [[coords.lng, coords.lat], [otherDev.lng, otherDev.lat]] : [[otherDev.lng, otherDev.lat], [coords.lng, coords.lat]] }
-                      });
-                  }
-                }
-              });
-              
-              map.getSource('drag-routes').setData({ type: 'FeatureCollection', features: dragFeatures });
-            });
-
-            marker.on('dragend', async () => {
-              const coords = marker.getLngLat();
-              dev.lng = coords.lng;
-              dev.lat = coords.lat;
-
-              map.getSource('drag-routes').setData({ type: 'FeatureCollection', features: [] });
-
-              const affected = linksByDevice[String(dev.id)] || [];
-
-              await Promise.all(affected.map(async link => {
-                const from = devMap[String(link.from)];
-                const to = devMap[String(link.to)];
-                if (!from || !to) return; 
-
-                const isAccessLink = !INFRA.has((from.type||'').toLowerCase()) && !INFRA.has((to.type||'').toLowerCase());
-
-                if (isAccessLink) {
-                  updateLiveRouteInMap(link.id, 'generic', [[from.lng, from.lat], [to.lng, to.lat]], { from: link.from, to: link.to });
-                } else {
-                  try {
-                    const response = await fetch('http://localhost:8000/api/route', {
-                      method: 'POST', headers: { 'Content-Type': 'application/json' },
-                      body: JSON.stringify({ a: { lat: from.lat, lng: from.lng }, b: { lat: to.lat, lng: to.lng }, link_id: `${link.from}-${link.to}`, link_type: 'generic' })
-                    });
-                    if (!response.ok) throw new Error(response.status);
-                    const osrmCoords = await response.json();
-                    updateLiveRouteInMap(link.id, 'generic', osrmCoords.map(([lat, lng]) => [lng, lat]), { from: link.from, to: link.to });
-                  } catch (err) {
-                    updateLiveRouteInMap(link.id, 'generic', [[from.lng, from.lat], [to.lng, to.lat]], { from: link.from, to: link.to });
-                  }
-                }
-              }));
-              // Push updated coords back into the GL source so the dot moves
-              if (!INFRA.has(dev.safeType) && map.getSource('devices')) {
-                map.getSource('devices').setData({
-                  type: 'FeatureCollection',
-                  features: devices.filter(d => !INFRA.has(d.safeType)).map(toGeoJSONFeature),
-                });
-              }
-              refreshFilters(); // restores the focusedSet filter — dot reappears at new position
-              updateClusterSource();
-            });
-          }
+        const customerLinks = candidates.filter(l => {
+            const fType = (devMap[String(l.from)]?.type || '').toLowerCase();
+            const tType = (devMap[String(l.to)]?.type || '').toLowerCase();
+            return !INFRA.has(fType) && !INFRA.has(tType) 
+                || (!INFRA.has(fType) && INFRA.has(tType))
+                || (INFRA.has(fType) && !INFRA.has(tType));
         });
+        if (focusId) {
+          const customerLinksToRender = candidates.filter(l =>
+            String(l.from) === String(focusId) || String(l.to) === String(focusId)
+          );
+          customerLinksToRender.forEach(l => {
+            const from = devMap[String(l.from)], to = devMap[String(l.to)];
+            if (from && to) {
+              updateLiveRouteInMap(l.id, 'generic',
+                [[from.lng, from.lat], [to.lng, to.lat]],
+                { from: l.from, to: l.to, fromName: from.name, toName: to.name }
+              );
+            }
+          });
+        }
 
-        ['clusters', 'cluster-count', 'clusters-outer', 'main-clusters', 'main-cluster-count', 'unclustered-main-devices']
-          .forEach(id => { if (map.getLayer(id)) map.setLayoutProperty(id, 'visibility', 'none'); });
+        const layersToHide = ['clusters', 'cluster-count', 'clusters-outer', 'main-clusters', 'main-cluster-count'];
+        if (!focusId) layersToHide.push('unclustered-main-devices');
+        layersToHide.forEach(id => { if (map.getLayer(id)) map.setLayoutProperty(id, 'visibility', 'none'); });
+
       }
 
       function hideMarkers() {
@@ -612,8 +522,14 @@ export default function NetworkMap() {
 
       hideMarkers();
 
-      map.on('moveend', () => { if (map.getZoom() >= 12) showMarkers(); });
-      map.on('zoomend', () => { map.getZoom() >= 12 ? showMarkers() : hideMarkers(); });
+      let _showMarkersTimer = null;
+      const debouncedShowMarkers = () => {
+        clearTimeout(_showMarkersTimer);
+        _showMarkersTimer = setTimeout(showMarkers, 120);
+      };
+
+      map.on('moveend', () => { if (map.getZoom() >= 12) debouncedShowMarkers(); });
+      map.on('zoomend', () => { map.getZoom() >= 12 ? debouncedShowMarkers() : hideMarkers(); });
 
       map.on('click', (e) => {
         const interactiveLayers = ['unclustered-main-devices', 'main-clusters', 'clusters', 'clusters-outer', 'unclustered-devices'];
