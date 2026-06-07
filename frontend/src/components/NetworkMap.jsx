@@ -71,7 +71,7 @@ export default function NetworkMap() {
         else if (t.includes('server')) safeType = 'server';
         else if (t.includes('switch')) safeType = 'switch';
         else if (t === 'router') safeType = 'router';
-        return { ...d, safeType }; // add safeType but keep the original casing for tooltips
+        return { ...d, safeType };
       });
 
       if (dbRoutes?.features?.length) {
@@ -154,12 +154,8 @@ export default function NetworkMap() {
           map.getCanvas().style.cursor = 'pointer';
           if (e.features.length > 0) {
             const props = e.features[0].properties;
-            
-            // 1. Set fallback values from the map properties
             let fromName = props.fromName;
             let toName = props.toName;
-            
-            // 2. Look up the REAL data from our React memory using the Link ID
             const actualLink = linkMap[String(props.id)];
             if (actualLink) {
               const fDev = devMap[String(actualLink.from)];
@@ -167,8 +163,6 @@ export default function NetworkMap() {
               if (fDev) fromName = fDev.name;
               if (tDev) toName = tDev.name;
             }
-
-            // 3. Final fallback: If name doesn't exist, show the ID. If that fails, 'Unknown'
             fromName = fromName || props.from || (actualLink ? actualLink.from : 'Unknown');
             toName = toName || props.to || (actualLink ? actualLink.to : 'Unknown');
 
@@ -224,12 +218,11 @@ export default function NetworkMap() {
         paint: { 'text-color': '#ffffff' }
       });
 
-      // --- NEW: VISUAL HIERARCHY FOR CUSTOMER DOTS ---
-      // Instead of HTML markers, customers render natively via WebGL as small, clean dots
+      // --- VISUAL HIERARCHY FOR CUSTOMER DOTS ---
       map.addLayer({
         id: 'unclustered-devices', type: 'circle', source: 'devices', filter: ['!', ['has', 'point_count']],
         paint: {
-          'circle-color': '#0ea5e9', // Clean light blue for standard customers
+          'circle-color': '#0ea5e9', 
           'circle-radius': 4.5,
           'circle-stroke-width': 1.5,
           'circle-stroke-color': '#ffffff',
@@ -245,13 +238,11 @@ export default function NetworkMap() {
       });
       map.on('mouseleave', 'unclustered-devices', () => { map.getCanvas().style.cursor = ''; customerPopup.remove(); });
       
-      // Allow clicking a customer dot to focus it, just like the HTML markers
       map.on('click', 'unclustered-devices', (e) => {
           customerPopup.remove();
           focusedDeviceIdRef.current = e.features[0].properties.id;
           showMarkers(); 
       });
-      // ------------------------------------------------
 
       map.addLayer({
         id: 'main-clusters', type: 'circle', source: 'main-devices', filter: ['has', 'point_count'],
@@ -283,11 +274,15 @@ export default function NetworkMap() {
 
       map.on('click', 'unclustered-main-devices', (e) => {
         mainDevPopup.remove(); 
-        focusedDeviceIdRef.current = e.features[0].properties.id;
+        const p = e.features[0].properties;
+        const dev = devMap[String(p.id)]; // Get the full device data
+        
+        focusedDeviceIdRef.current = dev.id;
         if (map.getZoom() >= 12) { showMarkers(); }
         else { map.easeTo({ center: e.features[0].geometry.coordinates, zoom: 13 }); }
-      });
-      
+        
+        showStatsPopup(dev); // <--- Triggers the popup instantly!
+      });      
       map.on('click', 'main-clusters', async (e) => {
         const features = map.queryRenderedFeatures(e.point, { layers: ['main-clusters'] });
         const clusterId = features[0].properties.cluster_id;
@@ -362,7 +357,6 @@ export default function NetworkMap() {
           if (map.getLayer('unclustered-main-devices')) {
             map.setFilter('unclustered-main-devices', ['match', ['to-string', ['get', 'id']], focusedSet, true, false]);
           }
-          // IMPORTANT: Fade out unconnected customer dots when an OLT is focused
           if (map.getLayer('unclustered-devices')) {
             map.setFilter('unclustered-devices', ['all', ['!', ['has', 'point_count']], ['match', ['to-string', ['get', 'id']], focusedSet, true, false]]);
           }
@@ -373,6 +367,61 @@ export default function NetworkMap() {
           ['main-clusters', 'main-cluster-count'].forEach(id => { if (map.getLayer(id)) map.setLayoutProperty(id, 'visibility', 'visible'); });
         }
       }
+
+      function showStatsPopup(dev) {
+        let statsHtml = '';
+        const connectedLinks = linksByDevice[String(dev.id)] || [];
+
+        if (dev.safeType === 'olt') {
+          const customerCount = Math.max(0, connectedLinks.length - 1);
+          statsHtml = `
+            <div style="display:flex; justify-content:space-between; margin-top:6px; font-size:12px;">
+              <span style="color:#64748b;">Downstream ONTs:</span>
+              <strong style="color:#10b981;">${customerCount} Units</strong>
+            </div>
+            <div style="display:flex; justify-content:space-between; margin-top:4px; font-size:12px;">
+              <span style="color:#64748b;">Uplink Port:</span>
+              <strong style="color:#3b82f6;">10G SFP+</strong>
+            </div>`;
+        } else if (dev.safeType === 'edge-router') {
+          const oltCount = connectedLinks.filter(l => devMap[String(l.to)]?.safeType === 'olt' || devMap[String(l.from)]?.safeType === 'olt').length;
+          statsHtml = `
+            <div style="display:flex; justify-content:space-between; margin-top:6px; font-size:12px;">
+              <span style="color:#64748b;">Subtended OLTs:</span>
+              <strong style="color:#2563eb;">${oltCount} Active Hubs</strong>
+            </div>
+            <div style="display:flex; justify-content:space-between; margin-top:4px; font-size:12px;">
+              <span style="color:#64748b;">Core Link:</span>
+              <strong style="color:#10b981;">100G Primary</strong>
+            </div>`;
+        } else if (dev.safeType === 'core-router') {
+          statsHtml = `
+            <div style="display:flex; justify-content:space-between; margin-top:6px; font-size:12px;">
+              <span style="color:#64748b;">Mesh Topology:</span>
+              <strong style="color:#9333ea;">Active Backbone</strong>
+            </div>
+            <div style="display:flex; justify-content:space-between; margin-top:4px; font-size:12px;">
+              <span style="color:#64748b;">Path Redundancy:</span>
+              <strong style="color:#10b981;">Active / Active</strong>
+            </div>`;
+        }
+
+        new maplibregl.Popup({ offset: 25, closeButton: true, closeOnClick: true })
+          .setLngLat([dev.lng, dev.lat])
+          .setHTML(`
+            <div style="font-family: system-ui, sans-serif; padding: 4px; min-width: 180px;">
+              <h4 style="margin: 0; font-size: 14px; color: #1e293b;">${dev.name}</h4>
+              <p style="margin: 2px 0 8px 0; font-size: 11px; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.05em;">
+                ${(dev.type || '').replace('-', ' ')}
+              </p>
+              <div style="padding-top: 6px; border-top: 1px solid #e2e8f0;">
+                ${statsHtml}
+              </div>
+            </div>
+          `)
+          .addTo(map);
+      }
+
 
       function showMarkers() {
         const bounds = map.getBounds();
@@ -393,23 +442,12 @@ export default function NetworkMap() {
         const visibleIds = new Set(devicesToRender.map(d => String(d.id)));
         const candidates = links.filter(l => (visibleIds.has(String(l.from)) || visibleIds.has(String(l.to))) && !fetchedRouteIdsRef.current.has(String(l.id)));
 
-        const accessLinks = candidates.filter(l => {
-          const f = devMap[String(l.from)], t = devMap[String(l.to)];
-          return f && t && !INFRA.has((f.type||'').toLowerCase()) && !INFRA.has((t.type||'').toLowerCase());
-        });
-        
-        if (accessLinks.length) {
-          const batch = [];
-          accessLinks.forEach(l => {
-            const f = devMap[String(l.from)], t = devMap[String(l.to)];
-            fetchedRouteIdsRef.current.add(String(l.id));
-            batch.push({ type: 'Feature', properties: { id: String(l.id), type: 'generic', from: String(l.from), to: String(l.to), fromName: f.name, toName: t.name }, geometry: { type: 'LineString', coordinates: [[f.lng, f.lat], [t.lng, t.lat]] } });
-          });
-          liveRoutesRef.current.features.push(...batch);
-          queueLiveRouteUpdate();
-        }
+        const infraLinks = candidates.filter(l => {
+            const fType = (devMap[String(l.from)]?.type || '').toLowerCase();
+            const tType = (devMap[String(l.to)]?.type || '').toLowerCase();
+            return INFRA.has(fType) || INFRA.has(tType);
+        }).slice(0, 20);
 
-        const infraLinks = candidates.filter(l => !accessLinks.includes(l)).slice(0, 20);
         if (infraLinks.length) {
           infraLinks.forEach(l => fetchedRouteIdsRef.current.add(String(l.id)));
           Promise.all(infraLinks.map(async (link) => {
@@ -427,20 +465,19 @@ export default function NetworkMap() {
           })).then(() => refreshFilters());
         }
 
-        // --- NEW: ONLY CREATE HTML MARKERS FOR INFRASTRUCTURE ---
+        // Cleanup out-of-bounds or non-infra markers
         for (const [id, marker] of activeMarkersRef.current.entries()) {
-            // Remove the HTML marker if it went off screen, OR if it's not an INFRA device
             if (!visibleIds.has(id) || !INFRA.has((devMap[id]?.type || '').toLowerCase())) {
                 marker.remove();
                 activeMarkersRef.current.delete(id);
             }
         }
 
+        // Generate dynamic HTML markers and popups for INFRA devices only
         devicesToRender.forEach(dev => {
           const id = String(dev.id);
           const isInfra = INFRA.has((dev.type || '').toLowerCase());
           
-          // Skip HTML marker generation entirely for customers (they use the WebGL dots now)
           if (!isInfra) return; 
           
           if (!activeMarkersRef.current.has(id)) {
@@ -448,12 +485,16 @@ export default function NetworkMap() {
             marker.addTo(map);
             activeMarkersRef.current.set(id, marker);
 
-            marker.getElement().addEventListener('click', (e) => {
+            const el = marker.getElement();
+            el.style.cursor = 'pointer';
+
+            // CLICK INTERACTIVITY
+            el.addEventListener('click', (e) => {
               e.stopPropagation();
               focusedDeviceIdRef.current = dev.id;
               showMarkers(); 
+              showStatsPopup(dev); // <--- Triggers the popup instantly!
             });
-
             marker.on('dragstart', () => {
                const affected = linksByDevice[String(dev.id)] || [];
                affected.forEach(l => modifiedRouteIdsRef.current.add(String(l.id)));
@@ -526,7 +567,6 @@ export default function NetworkMap() {
           }
         });
 
-        // NOTE: We do NOT hide 'unclustered-devices' here anymore, because that's our customer layer!
         ['clusters', 'cluster-count', 'clusters-outer', 'main-clusters', 'main-cluster-count', 'unclustered-main-devices']
           .forEach(id => { if (map.getLayer(id)) map.setLayoutProperty(id, 'visibility', 'none'); });
       }
@@ -540,7 +580,6 @@ export default function NetworkMap() {
 
         ['links', 'live'].forEach(prefix => { if (map.getLayer(`${prefix}-generic`)) map.setLayoutProperty(`${prefix}-generic`, 'visibility', 'none'); });
         
-        // Re-enable visibility for standard clustering
         ['clusters', 'cluster-count', 'clusters-outer', 'main-clusters', 'main-cluster-count', 'unclustered-main-devices']
           .forEach(id => { if (map.getLayer(id)) map.setLayoutProperty(id, 'visibility', 'visible'); });
         if (map.getLayer('unclustered-main-devices')) map.setFilter('unclustered-main-devices', null);
@@ -553,7 +592,6 @@ export default function NetworkMap() {
       map.on('zoomend', () => { map.getZoom() >= 12 ? showMarkers() : hideMarkers(); });
 
       map.on('click', (e) => {
-        // Included 'unclustered-devices' so clicking a customer dot doesn't clear the map focus
         const interactiveLayers = ['unclustered-main-devices', 'main-clusters', 'clusters', 'clusters-outer', 'unclustered-devices'];
         const activeLayers = interactiveLayers.filter(l => map.getLayer(l) && map.getLayoutProperty(l, 'visibility') !== 'none');
         

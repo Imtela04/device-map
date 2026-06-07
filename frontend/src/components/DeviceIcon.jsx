@@ -1,21 +1,20 @@
 import { Router, Server, Network, GitFork, Radio } from 'lucide-react';
-import { DEVICE_COLORS } from '../data/networkData';
 
+// Define Tailwind background classes instead of hex codes
 const deviceConfig = {
-  'core-router': { icon: Network,     color: DEVICE_COLORS['core-router'] },
-  'router':      { icon: Router,      color: DEVICE_COLORS['router'] },
-  'switch':      { icon: GitFork,     color: DEVICE_COLORS['switch'] },
-  'edge-router': { icon: Radio,       color: DEVICE_COLORS['edge-router'] },
-  'server':      { icon: Server,      color: DEVICE_COLORS['server'] },
-  'olt':         { icon: Server,      color: DEVICE_COLORS['olt'] || '#14b8a6' },
+  'core-router': { icon: Network,  bgClass: 'bg-purple-600' },
+  'router':      { icon: Router,   bgClass: 'bg-green-500' },
+  'switch':      { icon: GitFork,  bgClass: 'bg-emerald-500' },
+  'edge-router': { icon: Radio,    bgClass: 'bg-orange-500' },
+  'server':      { icon: Server,   bgClass: 'bg-slate-600' },
+  'olt':         { icon: Server,   bgClass: 'bg-teal-500' }, 
 };
 
 export default function DeviceIcon({ type }) {
-    // If the type is totally unrecognized, it falls back to a standard router
-    const { icon: Icon, color } = deviceConfig[type.toLowerCase()] || deviceConfig['router'];
+    const { icon: Icon, bgClass } = deviceConfig[type?.toLowerCase()] || deviceConfig['router'];
     
     return (
-        <div style={{ background: color }} className="p-1 rounded-full shadow-sm border border-white">
+        <div className={`${bgClass} p-1 rounded-full shadow-sm border border-white`}>
             <Icon size={16} color="white" />
         </div>
     );
