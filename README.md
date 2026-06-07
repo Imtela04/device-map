@@ -270,7 +270,7 @@ Requires both the Vite dev server and FastAPI backend to be running.
 | Type | Icon | Colour |
 |---|---|---|
 | Core Router | Network | Red `#ef4444` |
-| Router | Router | Blue `#3b82f6` |
+| Router | Router | Magenta `#f63bbe` |
 | Switch | GitFork | Amber `#f59e0b` |
 | Edge Router | Radio | Purple `#8b5cf6` |
 | Server | Server | Green `#22c55e` |

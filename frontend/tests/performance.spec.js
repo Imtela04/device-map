@@ -93,7 +93,7 @@ test('renders 50000 DOM markers within 5000ms', async ({ page }) => {
             const { Marker, Popup } = window.maplibregl;
             Array.from({ length: 50000 }, (_, i) => {
                 const el = document.createElement('div');
-                el.style.cssText = 'width:32px;height:32px;border-radius:50%;background:#3b82f6;border:2px solid white;';
+                el.style.cssText = 'width:32px;height:32px;border-radius:50%;background:#f63bbe;border:2px solid white;';
                 new Marker({ element: el })
                     .setLngLat([90.4 + Math.random() * 0.5, 23.7 + Math.random() * 0.5])
                     .addTo(map);

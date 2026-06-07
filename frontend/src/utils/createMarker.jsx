@@ -11,11 +11,5 @@ export function createMarker(dev, map) {
     const marker = new maplibregl.Marker({ element: el, draggable: true })
         .setLngLat([dev.lng, dev.lat]);
 
-    const popup = new maplibregl.Popup({ closeButton: false, offset: 28 })
-        .setHTML(`<div style="padding:2px 6px"><strong style="font-size:12px">${dev.name}</strong><br/><span style="font-size:11px;color:#64748b">${dev.type}</span></div>`);
-
-    el.addEventListener('mouseenter', () => popup.setLngLat(marker.getLngLat()).addTo(map));
-    el.addEventListener('mouseleave', () => popup.remove());
-
     return marker;
 }

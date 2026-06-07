@@ -17,7 +17,7 @@ export const LINKS = [
 
 export const DEVICE_COLORS = {
   'core-router': '#ef4444',
-  'router':      '#3b82f6',
+  'router':      '#f63bbe',
   'switch':      '#f59e0b',
   'edge-router': '#8b5cf6',
   'server':      '#22c55e',

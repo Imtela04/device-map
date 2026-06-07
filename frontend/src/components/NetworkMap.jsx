@@ -71,7 +71,7 @@ export default function NetworkMap() {
         else if (t.includes('server')) safeType = 'server';
         else if (t.includes('switch')) safeType = 'switch';
         else if (t === 'router') safeType = 'router';
-        return { ...d, safeType };
+        return { ...d, safeType }; 
       });
 
       if (dbRoutes?.features?.length) {
@@ -144,7 +144,7 @@ export default function NetworkMap() {
           type: 'line', 
           source: sourceId, 
           minzoom: 11.5, 
-          paint: { 'line-color': '#94a3b8', 'line-width': 4 }
+          paint: { 'line-color': '#94a3b850', 'line-width': 4 }
         };
         if (sourceLayer) layerConfig['source-layer'] = sourceLayer;
 
@@ -156,6 +156,7 @@ export default function NetworkMap() {
             const props = e.features[0].properties;
             let fromName = props.fromName;
             let toName = props.toName;
+            
             const actualLink = linkMap[String(props.id)];
             if (actualLink) {
               const fDev = devMap[String(actualLink.from)];
@@ -163,6 +164,7 @@ export default function NetworkMap() {
               if (fDev) fromName = fDev.name;
               if (tDev) toName = tDev.name;
             }
+
             fromName = fromName || props.from || (actualLink ? actualLink.from : 'Unknown');
             toName = toName || props.to || (actualLink ? actualLink.to : 'Unknown');
 
@@ -203,14 +205,14 @@ export default function NetworkMap() {
       map.addLayer({
         id: 'clusters-outer', type: 'circle', source: 'devices', filter: ['has', 'point_count'],
         paint: {
-          'circle-color': ['step', ['get', 'point_count'], 'rgba(34, 197, 94, 0.15)', 100, 'rgba(245, 158, 11, 0.15)', 1000, 'rgba(239, 68, 68, 0.15)'],
+          'circle-color': ['step', ['get', 'point_count'], 'rgba(85, 74, 82, 0.07)', 100, 'rgba(85, 74, 82, 0.07)', 1000, 'rgba(85, 74, 82, 0.07)'],
           'circle-radius': ['step', ['get', 'point_count'], 12, 100, 15, 1000, 18],
-          'circle-stroke-width': 1, 'circle-stroke-color': ['step', ['get', 'point_count'], 'rgba(34, 197, 94, 0.4)', 100, 'rgba(245, 158, 11, 0.4)', 1000, 'rgba(239, 68, 68, 0.4)']
+          'circle-stroke-width': 1, 'circle-stroke-color': ['step', ['get', 'point_count'], 'rgba(143, 138, 143, 0.4)', 100, 'rgba(143, 138, 143, 0.4)', 1000, 'rgba(143, 138, 143, 0.4)']
         }
       });
       map.addLayer({
         id: 'clusters', type: 'circle', source: 'devices', filter: ['has', 'point_count'],
-        paint: { 'circle-color': ['step', ['get', 'point_count'], '#22c55e', 100, '#f59e0b', 1000, '#ef4444'], 'circle-radius': ['step', ['get', 'point_count'], 9, 100, 12, 1000, 15], 'circle-stroke-width': 0 }
+        paint: { 'circle-color': ['step', ['get', 'point_count'], '#80607650', 100, '#80607648', 1000, '#80607648'], 'circle-radius': ['step', ['get', 'point_count'], 9, 100, 12, 1000, 15], 'circle-stroke-width': 0 }
       });
       map.addLayer({
         id: 'cluster-count', type: 'symbol', source: 'devices', filter: ['has', 'point_count'],
@@ -222,21 +224,13 @@ export default function NetworkMap() {
       map.addLayer({
         id: 'unclustered-devices', type: 'circle', source: 'devices', filter: ['!', ['has', 'point_count']],
         paint: {
-          'circle-color': '#0ea5e9', 
+          'circle-color': '#f63bbe', 
           'circle-radius': 4.5,
           'circle-stroke-width': 1.5,
           'circle-stroke-color': '#ffffff',
           'circle-opacity': 0.9
         }
       });
-
-      const customerPopup = new maplibregl.Popup({ closeButton: false, closeOnClick: false, offset: 5 });
-      map.on('mouseenter', 'unclustered-devices', (e) => {
-          map.getCanvas().style.cursor = 'pointer';
-          const p = e.features[0].properties;
-          customerPopup.setLngLat(e.lngLat).setHTML(`<div style="padding:2px 6px"><strong style="font-size:12px">${p.name}</strong><br/><span style="font-size:11px;color:#64748b">${p.type}</span></div>`).addTo(map);
-      });
-      map.on('mouseleave', 'unclustered-devices', () => { map.getCanvas().style.cursor = ''; customerPopup.remove(); });
       
       map.on('click', 'unclustered-devices', (e) => {
           customerPopup.remove();
@@ -264,25 +258,75 @@ export default function NetworkMap() {
         paint: { 'text-color': '#1e293b', 'text-halo-color': '#ffffff', 'text-halo-width': 1.5 },
       });
 
-      const mainDevPopup = new maplibregl.Popup({ closeButton: false, offset: 20 });
-      map.on('mouseenter', 'unclustered-main-devices', (e) => {
-        map.getCanvas().style.cursor = 'pointer';
-        const p = e.features[0].properties;
-        mainDevPopup.setLngLat(e.lngLat).setHTML(`<div style="padding:2px 6px"><strong style="font-size:12px">${p.name}</strong><br/><span style="font-size:11px;color:#64748b">${p.type}</span></div>`).addTo(map);
-      });
-      map.on('mouseleave', 'unclustered-main-devices', () => { map.getCanvas().style.cursor = ''; mainDevPopup.remove(); });
 
+      // --- CENTRALIZED STATS POPUP ---
+      function showStatsPopup(dev) {
+
+        let statsHtml = '';
+        const connectedLinks = linksByDevice[String(dev.id)] || [];
+
+        if (dev.safeType === 'olt') {
+          const customerCount = Math.max(0, connectedLinks.length - 1);
+          statsHtml = `
+            <div style="display:flex; justify-content:space-between; margin-top:6px; font-size:12px;">
+              <span style="color:#64748b;">Downstream ONTs:</span>
+              <strong style="color:#10b981;">${customerCount} Units</strong>
+            </div>
+            <div style="display:flex; justify-content:space-between; margin-top:4px; font-size:12px;">
+              <span style="color:#64748b;">Uplink Port:</span>
+              <strong style="color:#3b82f6;">10G SFP+</strong>
+            </div>`;
+        } else if (dev.safeType === 'edge-router') {
+          const oltCount = connectedLinks.filter(l => devMap[String(l.to)]?.safeType === 'olt' || devMap[String(l.from)]?.safeType === 'olt').length;
+          statsHtml = `
+            <div style="display:flex; justify-content:space-between; margin-top:6px; font-size:12px;">
+              <span style="color:#64748b;">Subtended OLTs:</span>
+              <strong style="color:#2563eb;">${oltCount} Active Hubs</strong>
+            </div>
+            <div style="display:flex; justify-content:space-between; margin-top:4px; font-size:12px;">
+              <span style="color:#64748b;">Core Link:</span>
+              <strong style="color:#10b981;">100G Primary</strong>
+            </div>`;
+        } else if (dev.safeType === 'core-router') {
+          statsHtml = `
+            <div style="display:flex; justify-content:space-between; margin-top:6px; font-size:12px;">
+              <span style="color:#64748b;">Mesh Topology:</span>
+              <strong style="color:#9333ea;">Active Backbone</strong>
+            </div>
+            <div style="display:flex; justify-content:space-between; margin-top:4px; font-size:12px;">
+              <span style="color:#64748b;">Path Redundancy:</span>
+              <strong style="color:#10b981;">Active / Active</strong>
+            </div>`;
+        }
+
+        new maplibregl.Popup({ offset: 25, closeButton: true, closeOnClick: true })
+          .setLngLat([dev.lng, dev.lat])
+          .setHTML(`
+            <div style="font-family: system-ui, sans-serif; padding: 4px; min-width: 180px;">
+              <h4 style="margin: 0; font-size: 14px; color: #1e293b;">${dev.name}</h4>
+              <p style="margin: 2px 0 8px 0; font-size: 11px; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.05em;">
+                ${(dev.type || '').replace('-', ' ')}
+              </p>
+              <div style="padding-top: 6px; border-top: 1px solid #e2e8f0;">
+                ${statsHtml}
+              </div>
+            </div>
+          `)
+          .addTo(map);
+      }
+
+      // Handle click on zoomed-out layer symbols
       map.on('click', 'unclustered-main-devices', (e) => {
-        mainDevPopup.remove(); 
         const p = e.features[0].properties;
-        const dev = devMap[String(p.id)]; // Get the full device data
+        const dev = devMap[String(p.id)]; // Get real device data
         
         focusedDeviceIdRef.current = dev.id;
         if (map.getZoom() >= 12) { showMarkers(); }
         else { map.easeTo({ center: e.features[0].geometry.coordinates, zoom: 13 }); }
-        
-        showStatsPopup(dev); // <--- Triggers the popup instantly!
-      });      
+
+        showStatsPopup(dev); // Trigger detailed stats!
+      });
+      
       map.on('click', 'main-clusters', async (e) => {
         const features = map.queryRenderedFeatures(e.point, { layers: ['main-clusters'] });
         const clusterId = features[0].properties.cluster_id;
@@ -368,61 +412,6 @@ export default function NetworkMap() {
         }
       }
 
-      function showStatsPopup(dev) {
-        let statsHtml = '';
-        const connectedLinks = linksByDevice[String(dev.id)] || [];
-
-        if (dev.safeType === 'olt') {
-          const customerCount = Math.max(0, connectedLinks.length - 1);
-          statsHtml = `
-            <div style="display:flex; justify-content:space-between; margin-top:6px; font-size:12px;">
-              <span style="color:#64748b;">Downstream ONTs:</span>
-              <strong style="color:#10b981;">${customerCount} Units</strong>
-            </div>
-            <div style="display:flex; justify-content:space-between; margin-top:4px; font-size:12px;">
-              <span style="color:#64748b;">Uplink Port:</span>
-              <strong style="color:#3b82f6;">10G SFP+</strong>
-            </div>`;
-        } else if (dev.safeType === 'edge-router') {
-          const oltCount = connectedLinks.filter(l => devMap[String(l.to)]?.safeType === 'olt' || devMap[String(l.from)]?.safeType === 'olt').length;
-          statsHtml = `
-            <div style="display:flex; justify-content:space-between; margin-top:6px; font-size:12px;">
-              <span style="color:#64748b;">Subtended OLTs:</span>
-              <strong style="color:#2563eb;">${oltCount} Active Hubs</strong>
-            </div>
-            <div style="display:flex; justify-content:space-between; margin-top:4px; font-size:12px;">
-              <span style="color:#64748b;">Core Link:</span>
-              <strong style="color:#10b981;">100G Primary</strong>
-            </div>`;
-        } else if (dev.safeType === 'core-router') {
-          statsHtml = `
-            <div style="display:flex; justify-content:space-between; margin-top:6px; font-size:12px;">
-              <span style="color:#64748b;">Mesh Topology:</span>
-              <strong style="color:#9333ea;">Active Backbone</strong>
-            </div>
-            <div style="display:flex; justify-content:space-between; margin-top:4px; font-size:12px;">
-              <span style="color:#64748b;">Path Redundancy:</span>
-              <strong style="color:#10b981;">Active / Active</strong>
-            </div>`;
-        }
-
-        new maplibregl.Popup({ offset: 25, closeButton: true, closeOnClick: true })
-          .setLngLat([dev.lng, dev.lat])
-          .setHTML(`
-            <div style="font-family: system-ui, sans-serif; padding: 4px; min-width: 180px;">
-              <h4 style="margin: 0; font-size: 14px; color: #1e293b;">${dev.name}</h4>
-              <p style="margin: 2px 0 8px 0; font-size: 11px; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.05em;">
-                ${(dev.type || '').replace('-', ' ')}
-              </p>
-              <div style="padding-top: 6px; border-top: 1px solid #e2e8f0;">
-                ${statsHtml}
-              </div>
-            </div>
-          `)
-          .addTo(map);
-      }
-
-
       function showMarkers() {
         const bounds = map.getBounds();
         const focusId = focusedDeviceIdRef.current;
@@ -465,7 +454,6 @@ export default function NetworkMap() {
           })).then(() => refreshFilters());
         }
 
-        // Cleanup out-of-bounds or non-infra markers
         for (const [id, marker] of activeMarkersRef.current.entries()) {
             if (!visibleIds.has(id) || !INFRA.has((devMap[id]?.type || '').toLowerCase())) {
                 marker.remove();
@@ -473,7 +461,6 @@ export default function NetworkMap() {
             }
         }
 
-        // Generate dynamic HTML markers and popups for INFRA devices only
         devicesToRender.forEach(dev => {
           const id = String(dev.id);
           const isInfra = INFRA.has((dev.type || '').toLowerCase());
@@ -485,16 +472,13 @@ export default function NetworkMap() {
             marker.addTo(map);
             activeMarkersRef.current.set(id, marker);
 
-            const el = marker.getElement();
-            el.style.cursor = 'pointer';
-
-            // CLICK INTERACTIVITY
-            el.addEventListener('click', (e) => {
+            marker.getElement().addEventListener('click', (e) => {
               e.stopPropagation();
               focusedDeviceIdRef.current = dev.id;
               showMarkers(); 
-              showStatsPopup(dev); // <--- Triggers the popup instantly!
+              showStatsPopup(dev); // Trigger detailed stats!
             });
+
             marker.on('dragstart', () => {
                const affected = linksByDevice[String(dev.id)] || [];
                affected.forEach(l => modifiedRouteIdsRef.current.add(String(l.id)));
