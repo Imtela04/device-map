@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import maplibregl from 'maplibre-gl';
 import { Protocol } from 'pmtiles';
 import { createMarker } from '../utils/createMarker'; 
@@ -15,6 +15,11 @@ export default function NetworkMap() {
   const focusedDeviceIdRef            = useRef(null);
   const fetchedRouteIdsRef            = useRef(new Set());
   const mainDevicesRef                = useRef([]);
+  const [stats, setStats]             = useState({ total: 0, online: 0, degraded: 0, down: 0 });
+  const searchRef                     = useRef(null);
+  const showMarkersRef                = useRef(null);  // will hold the showMarkers fn
+  const devMapRef                     = useRef({});    // mirror of devMap for search access
+
 
   // Helper Set to identify Infrastructure vs Customers
   const INFRA = new Set(['core-router', 'router', 'edge-router', 'olt', 'server', 'switch']);
@@ -39,6 +44,11 @@ export default function NetworkMap() {
     });
 
     map.on('load', async () => {
+      function mockStatus(id) {
+        const n = String(id).split('').reduce((a, c) => a + c.charCodeAt(0), 0);
+        return ['online','online','online','online','online','online','degraded','degraded','down','down'][n % 10];
+      }
+
 
       await loadDeviceIcons(map);
 
@@ -101,6 +111,7 @@ export default function NetworkMap() {
       devices.forEach(d => {
         const strId = String(d.id);
         devMap[strId] = d;
+        devMapRef.current = devMap; // expose to search handler
         linksByDevice[strId] = [];
       });
 
@@ -112,6 +123,15 @@ export default function NetworkMap() {
         if (!linksByDevice[toId]) linksByDevice[toId] = [];
         linksByDevice[fromId].push(l);
         linksByDevice[toId].push(l);
+      });
+      
+      // Compute health stats from all links
+      const statuses = links.map(l => mockStatus(l.id));
+      setStats({
+        total: links.length,
+        online:   statuses.filter(s => s === 'online').length,
+        degraded: statuses.filter(s => s === 'degraded').length,
+        down:     statuses.filter(s => s === 'down').length,
       });
 
       const accessDevices = [];
@@ -144,7 +164,7 @@ export default function NetworkMap() {
           type: 'line', 
           source: sourceId, 
           minzoom: 10, 
-          paint: { 'line-color': '#f804bb3f', 'line-width': 4 }
+          paint: { 'line-color': '#f804bb', 'line-width': 4 }
         };
         if (sourceLayer) layerConfig['source-layer'] = sourceLayer;
 
@@ -201,6 +221,52 @@ export default function NetworkMap() {
       addRouteLayers('links-vector', 'links', 'networklinks');
       addRouteLayers('live-routes', 'live');
 
+      map.setPaintProperty('live-generic', 'line-color',
+        ['coalesce', ['get', 'statusColor'], '#ffffff88']
+      );
+
+      map.setPaintProperty('live-generic', 'line-width', [
+        'match', ['get', 'tier'],
+        'core',   6.0,
+        'edge',   4.0,
+        'olt',    3.0,
+        2.0,
+        /* access */ 1.2
+      ]);
+
+      map.setPaintProperty('live-generic', 'line-opacity', [
+        'match', ['get', 'tier'],
+        'core', 1,
+        'edge', 0.9,
+        'olt',  0.7,
+        0.8
+      ]);
+
+      map.addLayer({
+        id: 'live-generic-glow',
+        type: 'line',
+        source: 'live-routes',
+        minzoom: 10,
+        paint: {
+          'line-color': ['coalesce', ['get', 'statusColor'], '#22c55e'],
+          'line-width': 12,
+          'line-opacity': 0.18,
+          'line-blur': 8,
+        }
+      }, 'live-generic');
+
+
+      // path-highlight: two-layer glow + solid status-coloured line
+      map.addSource('path-highlight', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
+      map.addLayer({
+        id: 'path-glow', type: 'line', source: 'path-highlight',
+        paint: { 'line-color': '#ffffff', 'line-width': 14, 'line-opacity': 0.18, 'line-blur': 8 }
+      });
+      map.addLayer({
+        id: 'path-line', type: 'line', source: 'path-highlight',
+        paint: { 'line-color': ['get', 'statusColor'], 'line-width': 3.5, 'line-opacity': 1 }
+      });
+
       // --- CLUSTER RENDERING ---
       map.addLayer({
         id: 'clusters-outer', type: 'circle', source: 'devices', filter: ['has', 'point_count'],
@@ -241,6 +307,7 @@ export default function NetworkMap() {
           // 2. Use the extracted featureId variable
           focusedDeviceIdRef.current = featureId;
           showMarkers(); 
+          showUpstreamPath(featureId);
           
           // 3. Find the full device object using devMap
           const dev = devMap[String(featureId)];
@@ -261,6 +328,7 @@ export default function NetworkMap() {
 
         map.once('moveend', () => {
           showMarkers();               // ensures marker exists at new zoom
+          showUpstreamPath(featureId);   
           if (dev) showStatsPopup(dev);
         });
       });
@@ -356,6 +424,57 @@ export default function NetworkMap() {
 
       // --- STATE & ROUTE MANAGEMENT ---
 
+      // Hierarchy tier — used to walk upstream from any device to core
+      const TIER = { access: 0, olt: 1, 'edge-router': 2, 'core-router': 3 };
+      const STATUS_COLOR = { online: '#22c55e', degraded: '#f59e0b', down: '#ef4444' };
+
+      // Deterministic mock status per link/device id — replace with API field when available
+
+      // Walk linksByDevice upward through the hierarchy from startId → core
+      function getUpstreamPath(startId) {
+        const linkIds = [], deviceIds = [];
+        let cur = String(startId);
+        for (let i = 0; i < 10; i++) {
+          const dev = devMap[cur];
+          if (!dev) break;
+          const tier = TIER[dev.safeType] ?? -1;
+          deviceIds.push(cur);
+          if (tier >= 3 || tier < 0) break;
+          const upLink = (linksByDevice[cur] || []).find(l => {
+            const otherId = String(l.from) === cur ? String(l.to) : String(l.from);
+            return (TIER[devMap[otherId]?.safeType] ?? -1) > tier;
+          });
+          if (!upLink) break;
+          linkIds.push(String(upLink.id));
+          cur = String(upLink.from) === cur ? String(upLink.to) : String(upLink.from);
+        }
+        return { linkIds, deviceIds };
+      }
+
+      // Populate the path-highlight source with the upstream chain of a clicked device.
+      // Uses road-following geometry from liveRoutesRef if already fetched, straight line otherwise.
+      function showUpstreamPath(deviceId) {
+        const { linkIds } = getUpstreamPath(deviceId);
+        const features = linkIds.map(lid => {
+          const color = STATUS_COLOR[mockStatus(lid)];
+          const existing = liveRoutesRef.current.features.find(f => String(f.properties.id) === lid);
+          if (existing) return { ...existing, properties: { ...existing.properties, statusColor: color } };
+          const link = linkMap[lid];
+          if (!link) return null;
+          const from = devMap[String(link.from)], to = devMap[String(link.to)];
+          if (!from || !to) return null;
+          return {
+            type: 'Feature',
+            properties: { id: lid, statusColor: color },
+            geometry: { type: 'LineString', coordinates: [[from.lng, from.lat], [to.lng, to.lat]] }
+          };
+        }).filter(Boolean);
+        map.getSource('path-highlight')?.setData({ type: 'FeatureCollection', features });
+      }
+
+      function clearUpstreamPath() {
+        map.getSource('path-highlight')?.setData({ type: 'FeatureCollection', features: [] });
+      }
       function queueLiveRouteUpdate() {
         if (liveRouteUpdateTimeout.current) return;
         liveRouteUpdateTimeout.current = setTimeout(() => {
@@ -371,9 +490,23 @@ export default function NetworkMap() {
         fetchedRouteIdsRef.current.add(safeId); 
         const features = liveRoutesRef.current.features.filter(f => String(f.properties.id) !== safeId);
         features.push({
-          type: 'Feature', properties: { id: safeId, type: linkType, ...props, from: String(props.from), to: String(props.to) },
+          type: 'Feature',
+          properties: {
+            id: safeId, type: linkType, ...props,
+            from: String(props.from), to: String(props.to),
+            statusColor: STATUS_COLOR[mockStatus(safeId)],
+            tier: (() => {
+              const fType = devMap[String(props.from)]?.safeType || '';
+              const tType = devMap[String(props.to)]?.safeType   || '';
+              if (fType === 'core-router' || tType === 'core-router') return 'core';
+              if (fType === 'edge-router' || tType === 'edge-router') return 'edge';
+              if (fType === 'olt'         || tType === 'olt')         return 'olt';
+              return 'access';
+            })(),
+          },
           geometry: { type: 'LineString', coordinates }
         });
+
         liveRoutesRef.current.features = features;
         queueLiveRouteUpdate();
         modifiedRouteIdsRef.current.add(safeId);
@@ -407,10 +540,15 @@ export default function NetworkMap() {
           ];
           
           staticFilter = excludeModified ? ['all', excludeModified, focusCheck] : focusCheck;
-          liveFilter = focusCheck; 
+          const focusedDev = devMap[String(focusId)];
+          const suppressCustomers = focusedDev?.safeType === 'olt' && map.getZoom() < 15;
+
+          liveFilter = suppressCustomers
+            ? ['all', focusCheck, ['!=', ['get', 'isInfra'], false]]
+            : focusCheck;        
         } else {
           staticFilter = excludeModified ?? null;
-          liveFilter = null; 
+          liveFilter = ['boolean', ['get', 'isInfra'], true];
         }
 
         if (map.getLayer('links-generic')) map.setFilter('links-generic', staticFilter);
@@ -445,16 +583,19 @@ export default function NetworkMap() {
             connectedLinks.map(l => String(l.from) === String(focusId) ? String(l.to) : String(l.from))
           );
           neighborIds.add(String(focusId));
+          // Search main array for the focused device and its neighbors (including customers!)
           devicesToRender = devices.filter(d => neighborIds.has(String(d.id)));
         } else {
-          // Only infra devices get HTML markers — no need to scan 60k customers
+          // Only infra devices get HTML markers normally — no need to scan 60k customers
           devicesToRender = mainDevicesRef.current.filter(dev =>
             dev.lng >= bounds.getWest() && dev.lng <= bounds.getEast() &&
             dev.lat >= bounds.getSouth() && dev.lat <= bounds.getNorth()
           );
         }
-        ['links', 'live'].forEach(prefix => { if (map.getLayer(`${prefix}-generic`)) map.setLayoutProperty(`${prefix}-generic`, 'visibility', 'visible'); });
-        refreshFilters();
+        
+        ['links-generic', 'live-generic', 'live-generic-glow'].forEach(id => {
+          if (map.getLayer(id)) map.setLayoutProperty(id, 'visibility', 'visible');
+        });
 
         const visibleIds = new Set(devicesToRender.map(d => String(d.id)));
 
@@ -472,38 +613,213 @@ export default function NetworkMap() {
         }
 
         const infraLinks = candidates.filter(l => {
-            const fType = (devMap[String(l.from)]?.type || '').toLowerCase();
-            const tType = (devMap[String(l.to)]?.type || '').toLowerCase();
-            return INFRA.has(fType) || INFRA.has(tType);
+            const fType = (devMap[String(l.from)]?.safeType || '');
+            const tType = (devMap[String(l.to)]?.safeType || '');
+            return INFRA.has(fType) && INFRA.has(tType);
         }).slice(0, 20);
 
-        const customerLinks = candidates.filter(l => {
-            const fType = (devMap[String(l.from)]?.type || '').toLowerCase();
-            const tType = (devMap[String(l.to)]?.type || '').toLowerCase();
-            return !INFRA.has(fType) && !INFRA.has(tType) 
-                || (!INFRA.has(fType) && INFRA.has(tType))
-                || (INFRA.has(fType) && !INFRA.has(tType));
-        });
+        if (infraLinks.length) {
+          infraLinks.forEach(l => fetchedRouteIdsRef.current.add(String(l.id)));
+          Promise.all(infraLinks.map(async (link) => {
+            const from = devMap[String(link.from)], to = devMap[String(link.to)];
+            if (!from || !to) return;
+            try {
+              const res = await fetch('http://localhost:8000/api/route', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ a: { lat: from.lat, lng: from.lng }, b: { lat: to.lat, lng: to.lng }, link_id: `${link.from}-${link.to}`, link_type: link.type || 'generic' }),
+              });
+              if (!res.ok) throw new Error(res.status);
+              const coords = await res.json();
+            updateLiveRouteInMap(link.id, link.type || 'generic', coords.map(([lat, lng]) => [lng, lat]),
+              { from: link.from, to: link.to, fromName: from.name, toName: to.name, isInfra: true });
+            } catch { updateLiveRouteInMap(link.id, 'generic', [[from.lng, from.lat], [to.lng, to.lat]],
+                    { from: link.from, to: link.to, fromName: from.name, toName: to.name, isInfra: true }); }
+          })).then(() => refreshFilters());
+        }
+
         if (focusId) {
-          const customerLinksToRender = candidates.filter(l =>
-            String(l.from) === String(focusId) || String(l.to) === String(focusId)
-          );
-          customerLinksToRender.forEach(l => {
+          const focusedDev = devMap[String(focusId)];
+          const isOlt = focusedDev?.safeType === 'olt';
+          const zoom = map.getZoom();
+          const bounds = map.getBounds();
+
+          // OLTs have ~600 customers — only draw lines that are actually in viewport
+          // and only when zoomed in enough to make individual lines meaningful
+          const customerLinksToRender = candidates.filter(l => {
+            if (String(l.from) !== String(focusId) && String(l.to) !== String(focusId)) return false;
+            if (isOlt && zoom < 15) return false; // suppress starburst at wide zoom
+
+            // only render customers visible in current viewport
+            const otherId = String(l.from) === String(focusId) ? String(l.to) : String(l.from);
+            const other = devMap[otherId];
+            if (!other) return false;
+            return (
+              other.lng >= bounds.getWest() && other.lng <= bounds.getEast() &&
+              other.lat >= bounds.getSouth() && other.lat <= bounds.getNorth()
+            );
+          });
+
+          customerLinksToRender.slice(0, 40).forEach(l => {
             const from = devMap[String(l.from)], to = devMap[String(l.to)];
             if (from && to) {
               updateLiveRouteInMap(l.id, 'generic',
                 [[from.lng, from.lat], [to.lng, to.lat]],
-                { from: l.from, to: l.to, fromName: from.name, toName: to.name }
+                { from: l.from, to: l.to, fromName: from.name, toName: to.name, isInfra: false }
               );
             }
           });
+        }        
+        // 1. Cleanup off-screen markers or unfocused customers
+        for (const [id, marker] of activeMarkersRef.current.entries()) {
+            const isInfra = INFRA.has(devMap[id]?.safeType || '');
+            const isFocused = id === String(focusedDeviceIdRef.current);
+            if (!visibleIds.has(id) || (!isInfra && !isFocused)) {
+                marker.remove();
+                activeMarkersRef.current.delete(id);
+            }
         }
+
+        // 2. Generate HTML markers
+        devicesToRender.forEach(dev => {
+          const id = String(dev.id);
+          const isInfra = INFRA.has(dev.safeType);
+          const isFocused = id === String(focusedDeviceIdRef.current);
+          
+          // IMPORTANT: Allow the focused customer device to become a marker!
+          if (!isInfra && !isFocused) return; 
+          
+          if (!activeMarkersRef.current.has(id)) {
+            const marker = createMarker(dev, map);  
+            const status = mockStatus(dev.id);
+            const el = marker.getElement();
+            el.classList.remove('marker-status-down', 'marker-status-degraded');
+            if (status === 'down')     el.classList.add('marker-status-down');
+            if (status === 'degraded') el.classList.add('marker-status-degraded');
+            marker.addTo(map);
+            activeMarkersRef.current.set(id, marker);
+
+            marker.getElement().addEventListener('click', (e) => {
+              e.stopPropagation();
+              focusedDeviceIdRef.current = dev.id;
+              showMarkers(); 
+              showStatsPopup(dev); 
+            });
+
+            marker.on('dragstart', () => {
+               const affected = linksByDevice[String(dev.id)] || [];
+               affected.forEach(l => modifiedRouteIdsRef.current.add(String(l.id)));
+               refreshFilters(); 
+            });
+
+            marker.on('drag', () => {
+              const coords = marker.getLngLat();
+              dev.lng = coords.lng; dev.lat = coords.lat;
+
+              const affected = linksByDevice[String(dev.id)] || [];
+              const dragFeatures = [];
+
+              affected.forEach(link => {
+                const isFrom = String(link.from) === String(dev.id);
+                const otherDevId = isFrom ? String(link.to) : String(link.from);
+                const otherDev = devMap[otherDevId];
+                
+                if (otherDev) {
+                  const isOtherDevInfra = INFRA.has(otherDev.safeType);
+                  const isThisDevInfra = INFRA.has(dev.safeType);
+
+                  if ((isThisDevInfra && isOtherDevInfra) || affected.length < 15) {
+                      dragFeatures.push({
+                        type: 'Feature', properties: { id: link.id },
+                        geometry: { type: 'LineString', coordinates: isFrom ? [[coords.lng, coords.lat], [otherDev.lng, otherDev.lat]] : [[otherDev.lng, otherDev.lat], [coords.lng, coords.lat]] }
+                      });
+                  }
+                }
+              });
+              
+              map.getSource('drag-routes').setData({ type: 'FeatureCollection', features: dragFeatures });
+            });
+
+            marker.on('dragend', async () => {
+              const coords = marker.getLngLat();
+              dev.lng = coords.lng; dev.lat = coords.lat;
+
+              map.getSource('drag-routes').setData({ type: 'FeatureCollection', features: [] });
+
+              const affected = linksByDevice[String(dev.id)] || [];
+              
+              // High-Performance Batching:
+              const affectedSet = new Set(affected.map(l => String(l.id)));
+              liveRoutesRef.current.features = liveRoutesRef.current.features.filter(
+                f => !affectedSet.has(String(f.properties.id))
+              );
+
+              const straightLineFeatures = [];
+              const osrmPromises = [];
+
+              affected.forEach(link => {
+                const from = devMap[String(link.from)];
+                const to = devMap[String(link.to)];
+                if (!from || !to) return; 
+                
+                modifiedRouteIdsRef.current.add(String(link.id));
+                fetchedRouteIdsRef.current.add(String(link.id));
+
+                const isInfraLink = INFRA.has(from.safeType) && INFRA.has(to.safeType);
+
+                if (isInfraLink) {
+                  osrmPromises.push(
+                    fetch('http://localhost:8000/api/route', {
+                      method: 'POST', headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({ a: { lat: from.lat, lng: from.lng }, b: { lat: to.lat, lng: to.lng }, link_id: `${link.from}-${link.to}`, link_type: link.type || 'generic' })
+                    }).then(res => res.json())
+                      .then(osrmCoords => {
+                      updateLiveRouteInMap(link.id, 'generic', osrmCoords.map(c => [c[1], c[0]]),
+                        { from: link.from, to: link.to, isInfra: true });
+                      })
+                      .catch(() => {
+                        updateLiveRouteInMap(link.id, 'generic', [[from.lng, from.lat], [to.lng, to.lat]],
+                          { from: link.from, to: link.to, isInfra: true });
+                      })
+                  );
+                } else {
+                  // Instant straight lines for 600+ customers!
+                  straightLineFeatures.push({
+                    type: 'Feature',
+                    properties: {
+                      id: String(link.id), type: 'generic',
+                      from: String(link.from), to: String(link.to),
+                      statusColor: STATUS_COLOR[mockStatus(link.id)],
+                      isInfra: false,
+                    },
+                    geometry: { type: 'LineString', coordinates: [[from.lng, from.lat], [to.lng, to.lat]] }
+                  });
+                }
+              });
+
+              if (straightLineFeatures.length > 0) {
+                 liveRoutesRef.current.features.push(...straightLineFeatures);
+                 queueLiveRouteUpdate();
+              }
+
+              await Promise.all(osrmPromises);
+              updateClusterSource();
+              if (!INFRA.has(dev.safeType) && map.getSource('devices')) {
+                map.getSource('devices').setData({
+                  type: 'FeatureCollection',
+                  features: accessDevices.map(toGeoJSONFeature),
+                });
+              }
+            });
+          }
+        });
 
         const layersToHide = ['clusters', 'cluster-count', 'clusters-outer', 'main-clusters', 'main-cluster-count'];
         if (!focusId) layersToHide.push('unclustered-main-devices');
         layersToHide.forEach(id => { if (map.getLayer(id)) map.setLayoutProperty(id, 'visibility', 'none'); });
 
       }
+
+      showMarkersRef.current = showMarkers;
 
       function hideMarkers() {
         for (const marker of activeMarkersRef.current.values()) {
@@ -512,7 +828,9 @@ export default function NetworkMap() {
         activeMarkersRef.current.clear();
         focusedDeviceIdRef.current = null; 
 
-        ['links', 'live'].forEach(prefix => { if (map.getLayer(`${prefix}-generic`)) map.setLayoutProperty(`${prefix}-generic`, 'visibility', 'none'); });
+        ['links-generic', 'live-generic', 'live-generic-glow'].forEach(id => {
+          if (map.getLayer(id)) map.setLayoutProperty(id, 'visibility', 'none');
+        });
         
         ['clusters', 'cluster-count', 'clusters-outer', 'main-clusters', 'main-cluster-count', 'unclustered-main-devices']
           .forEach(id => { if (map.getLayer(id)) map.setLayoutProperty(id, 'visibility', 'visible'); });
@@ -521,6 +839,7 @@ export default function NetworkMap() {
       }      
 
       hideMarkers();
+      clearUpstreamPath();
 
       let _showMarkersTimer = null;
       const debouncedShowMarkers = () => {
@@ -543,6 +862,7 @@ export default function NetworkMap() {
         if (e.originalEvent.target.tagName.toLowerCase() !== 'canvas') return;
         
         focusedDeviceIdRef.current = null;
+        clearUpstreamPath();
         if (map.getZoom() >= 12) { showMarkers(); } 
         else { hideMarkers(); }
       });
@@ -567,7 +887,28 @@ export default function NetworkMap() {
       map.on('mouseenter', 'clusters-outer', () => { map.getCanvas().style.cursor = 'pointer'; });
       map.on('mouseleave', 'clusters-outer', () => { map.getCanvas().style.cursor = ''; });
 
-    });    
+    });   
+    
+      const handleSearch = (e) => {
+      if (e.key !== 'Enter') return;
+      const q = e.target.value.trim().toLowerCase();
+      if (!q) return;
+      const match = Object.values(devMapRef.current).find(d =>
+        d.name?.toLowerCase().includes(q) || String(d.id).toLowerCase().includes(q)
+      );
+      if (!match) return;
+      const map = mapInstanceRef.current;
+      map.flyTo({ center: [match.lng, match.lat], zoom: 15, duration: 900 });
+      map.once('moveend', () => {
+        focusedDeviceIdRef.current = String(match.id);
+        showMarkersRef.current?.();
+      });
+      if (searchRef.current) searchRef.current.blur();
+    };
+
+    searchRef.current?.addEventListener('keydown', handleSearch);
+    // cleanup:
+    searchRef.current?.removeEventListener('keydown', handleSearch);
 
     return () => {
       if (liveRouteUpdateTimeout.current) clearTimeout(liveRouteUpdateTimeout.current);
@@ -579,7 +920,88 @@ export default function NetworkMap() {
 
   return (
     <div className='relative'>
-        <div ref={mapRef} style={{ height: '100vh', width: '100%' }} />
+      <div ref={mapRef} style={{ height: '100vh', width: '100%' }} />
+
+      {/* ── Search Bar ── */}
+      <div style={{
+        position:'absolute', top:12, right:16, zIndex:10,
+        display:'flex', alignItems:'center', gap:8,
+        background:'rgba(15,23,42,0.9)', backdropFilter:'blur(10px)',
+        border:'1px solid rgba(255,255,255,0.07)', borderRadius:10,
+        padding:'6px 12px', boxShadow:'0 4px 20px rgba(0,0,0,0.4)'
+      }}>
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#64748b" strokeWidth="2.5">
+          <circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/>
+        </svg>
+        <input
+          ref={searchRef}
+          placeholder="Search device…"
+          style={{
+            background:'transparent', border:'none', outline:'none',
+            color:'#e2e8f0', fontSize:13, width:180,
+            fontFamily:'system-ui,sans-serif'
+          }}
+        />
+      </div>
+
+      {/* ── Health HUD ── */}
+      <div style={{
+        position:'absolute', top:12, left:'50%', transform:'translateX(-50%)',
+        zIndex:10, background:'rgba(15,23,42,0.9)', backdropFilter:'blur(10px)',
+        border:'1px solid rgba(255,255,255,0.07)', borderRadius:12,
+        padding:'8px 24px', display:'flex', gap:32, alignItems:'center',
+        fontFamily:'system-ui,sans-serif', pointerEvents:'none',
+        boxShadow:'0 4px 32px rgba(0,0,0,0.5)'
+      }}>
+
+      {/* ── Status Legend ── */}
+      <div style={{
+        position:'absolute', bottom:32, left:16, zIndex:10,
+        background:'rgba(15,23,42,0.88)', backdropFilter:'blur(8px)',
+        border:'1px solid rgba(255,255,255,0.07)', borderRadius:10,
+        padding:'10px 14px', fontFamily:'system-ui,sans-serif',
+        boxShadow:'0 4px 20px rgba(0,0,0,0.4)'
+      }}>
+        <div style={{ fontSize:10, color:'#475569', textTransform:'uppercase', letterSpacing:'0.08em', marginBottom:8, fontWeight:600 }}>
+          Link Status
+        </div>
+        {[
+          { color:'#22c55e', label:'Online' },
+          { color:'#f59e0b', label:'Degraded' },
+          { color:'#ef4444', label:'Down' },
+        ].map(({ color, label }) => (
+          <div key={label} style={{ display:'flex', alignItems:'center', gap:8, marginBottom:5 }}>
+            <div style={{ width:24, height:3, borderRadius:2, background:color }} />
+            <span style={{ fontSize:12, color:'#cbd5e1' }}>{label}</span>
+          </div>
+        ))}
+        <div style={{ borderTop:'1px solid rgba(255,255,255,0.06)', marginTop:8, paddingTop:8 }}>
+          {[
+            { color:'#7c3aed', label:'Core / Edge (infra)' },
+            { color:'#f63bbe', label:'Customer access' },
+          ].map(({ color, label }) => (
+            <div key={label} style={{ display:'flex', alignItems:'center', gap:8, marginBottom:4 }}>
+              <div style={{ width:10, height:10, borderRadius:'50%', background:color, flexShrink:0 }} />
+              <span style={{ fontSize:11, color:'#94a3b8' }}>{label}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+        <span style={{color:'#475569', fontSize:10, textTransform:'uppercase', letterSpacing:'0.1em', fontWeight:600}}>
+          Network Health
+        </span>
+        {[
+          { label:'Total Links', value: stats.total,    color:'#94a3b8' },
+          { label:'Online',      value: stats.online,   color:'#22c55e' },
+          { label:'Degraded',    value: stats.degraded, color:'#f59e0b' },
+          { label:'Down',        value: stats.down,     color:'#ef4444' },
+        ].map(({ label, value, color }) => (
+          <div key={label} style={{ textAlign:'center' }}>
+            <div style={{ fontSize:20, fontWeight:700, color, lineHeight:1 }}>{value.toLocaleString()}</div>
+            <div style={{ fontSize:10, color:'#64748b', marginTop:2 }}>{label}</div>
+          </div>
+        ))}
+      </div>
     </div>
   )
 }

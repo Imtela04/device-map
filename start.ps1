@@ -12,8 +12,20 @@ function Write-Step($msg) {
 # --- OSRM (Docker) ---
 if (-not $SkipDocker) {
   Write-Step "Starting OSRM routing engine..."
-  $running = docker ps --filter "publish=5000" --format "{{.ID}}"
   
+  # check docker is reachable before proceeding
+  $dockerOk = $false
+  try {
+    $null = docker info 2>&1
+    if ($LASTEXITCODE -eq 0) { $dockerOk = $true }
+  } catch {}
+
+  if (-not $dockerOk) {
+    Write-Host "   ERROR: Docker Desktop is not running. Start it first, then re-run." -ForegroundColor Red
+    exit 1
+  }
+
+  $running = docker ps --filter "publish=5000" --format "{{.ID}}"  
   if ($running) {
     Write-Host "   OSRM already running (container $running)" -ForegroundColor Yellow
   } else {

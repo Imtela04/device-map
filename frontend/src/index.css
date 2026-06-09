@@ -8,3 +8,34 @@ body {
   width: 100%;
   height: 100vh;
 }
+
+@keyframes noc-pulse {
+  0%   { transform: scale(1);   opacity: 0.85; }
+  70%  { transform: scale(2.4); opacity: 0; }
+  100% { transform: scale(2.4); opacity: 0; }
+}
+
+.marker-status-down {
+  position: relative;
+}
+.marker-status-down::after {
+  content: '';
+  position: absolute;
+  inset: -3px;
+  border-radius: 50%;
+  background: #ef4444;
+  animation: noc-pulse 1.6s ease-out infinite;
+  pointer-events: none;
+  z-index: -1;
+}
+
+.marker-status-degraded::after {
+  content: '';
+  position: absolute;
+  inset: -3px;
+  border-radius: 50%;
+  background: #f59e0b;
+  animation: noc-pulse 2.5s ease-out infinite;
+  pointer-events: none;
+  z-index: -1;
+}
