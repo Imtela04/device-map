@@ -1,11 +1,15 @@
 const inFlight = new Map();
-const resolved = new Map(); // ← persists for session lifetime
+const resolved = new Map();
 
-export async function fetchRoute(a, b) {
+export async function fetchRoute(a, b, extra = {}) {
   const key = `${a.lat},${a.lng},${b.lat},${b.lng}`;
-  
-  if (resolved.has(key)) return resolved.get(key);  // instant
-  if (inFlight.has(key)) return inFlight.get(key);  // dedupe concurrent
+  const isPersist = Boolean(extra.link_id);
+
+  // Bypass cache for persist calls so dragend always hits the backend
+  if (!isPersist) {
+    if (resolved.has(key)) return resolved.get(key);
+    if (inFlight.has(key)) return inFlight.get(key);
+  }
 
   const promise = (async () => {
     try {
@@ -14,19 +18,19 @@ export async function fetchRoute(a, b) {
       const res = await fetch('http://localhost:8000/api/route', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ a, b }),
+        body: JSON.stringify({ a, b, ...extra }),
         signal: ctrl.signal,
       });
       const data = await res.json();
-      resolved.set(key, data);   // ← cache the result
+      resolved.set(key, data); // always refresh cache with the latest result
       return data;
     } catch {
       return [[a.lat, a.lng], [b.lat, b.lng]];
     } finally {
-      inFlight.delete(key);
+      if (!isPersist) inFlight.delete(key);
     }
   })();
 
-  inFlight.set(key, promise);
+  if (!isPersist) inFlight.set(key, promise);
   return promise;
 }
