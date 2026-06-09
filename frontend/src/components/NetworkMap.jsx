@@ -7,12 +7,15 @@ import { fetchRoute } from '../utils/fetchRoute';
 import { toGeoJSON } from '../utils/toGeoJSON';
 import Legend from './Legend';
 
+
+const INFRA = new Set(['core-router', 'router', 'edge-router', 'olt', 'server', 'switch']);
+
 export default function NetworkMap() {
   const mapRef                        = useRef(null);
   const mapInstanceRef                = useRef(null);
   const activeMarkersRef              = useRef(new Map()); 
   const liveRouteUpdateTimeout        = useRef(null);
-
+  const liveRouteMapRef               = useRef(new Map());
   const modifiedRouteIdsRef           = useRef(new Set());
   const liveRoutesRef                 = useRef({ type: 'FeatureCollection', features: [] });
   const focusedDeviceIdRef            = useRef(null);
@@ -25,7 +28,6 @@ export default function NetworkMap() {
 
 
   // Helper Set to identify Infrastructure vs Customers
-  const INFRA = new Set(['core-router', 'router', 'edge-router', 'olt', 'server', 'switch']);
 
   useEffect(() => {
     if (mapInstanceRef.current) return;
@@ -113,6 +115,11 @@ export default function NetworkMap() {
         });
       }
 
+      liveRoutesRef.current.features.forEach(f =>
+        liveRouteMapRef.current.set(String(f.properties.id), f)
+      );
+
+
       const devMap = {};
       const linkMap = {};
       const ObjectLinksByDevice = {};
@@ -120,9 +127,10 @@ export default function NetworkMap() {
       devices.forEach(d => {
         const strId = String(d.id);
         devMap[strId] = d;
-        devMapRef.current = devMap; 
         ObjectLinksByDevice[strId] = [];
       });
+
+      devMapRef.current = devMap; 
 
       links.forEach(l => {
         linkMap[String(l.id)] = l;
@@ -160,7 +168,7 @@ export default function NetworkMap() {
 
 
       map.addSource('main-devices', {
-        type: 'geojson', cluster: true, clusterMaxZoom: 9, clusterRadius: 35,
+        type: 'geojson',
         data: { type: 'FeatureCollection', features: mainDevicesRef.current.map(toGeoJSONFeature) }
       });
 
@@ -172,7 +180,6 @@ export default function NetworkMap() {
           id: layerId, 
           type: 'line', 
           source: sourceId, 
-          minzoom: 10, 
           paint: { 'line-color': 'rgba(0,0,0,0)', 'line-width': 4 }
         };
         if (sourceLayer) layerConfig['source-layer'] = sourceLayer;
@@ -230,36 +237,48 @@ export default function NetworkMap() {
         ['coalesce', ['get', 'statusColor'], ['get', 'tierColor'], '#4f46e5']
       );
 
+      // line-width
       map.setPaintProperty('live-generic', 'line-width', [
-        'case',
-        ['==', ['get', 'tier'], 'core'], 6.0,
-        ['==', ['get', 'tier'], 'edge'], 4.0,
-        ['==', ['get', 'tier'], 'olt'],  3.0,
-        2.0 // Fallback for access/customers
+        'step', ['zoom'],
+        ['case', ['==', ['get', 'tier'], 'core'], 1.5, 0],
+        4,  ['case', ['==', ['get', 'tier'], 'core'], 3.0, 0],
+        6,  ['case', ['==', ['get', 'tier'], 'core'], 4.0, ['==', ['get', 'tier'], 'edge'], 2.0, 0],
+        8,  ['case', ['==', ['get', 'tier'], 'core'], 5.0, ['==', ['get', 'tier'], 'edge'], 3.0, ['==', ['get', 'tier'], 'olt'], 1.5, 0],
+        10, ['case', ['==', ['get', 'tier'], 'core'], 6.0, ['==', ['get', 'tier'], 'edge'], 4.0, ['==', ['get', 'tier'], 'olt'], 3.0, 2.0],
       ]);
 
+      // line-opacity
       map.setPaintProperty('live-generic', 'line-opacity', [
-        'case',
-        ['==', ['get', 'tier'], 'core'], 1.0,
-        ['==', ['get', 'tier'], 'edge'], 0.9,
-        ['==', ['get', 'tier'], 'olt'],  0.8,
-        0.8 // Fallback for access/customers
+        'step', ['zoom'],
+        // Zoom < 6: Show only Core
+        ['case', ['==', ['get', 'tier'], 'core'], 0.8, 0.0],
+        // Zoom 6-8: Show Core + Edge
+        6, ['case', ['==', ['get', 'tier'], 'core'], 1.0, ['==', ['get', 'tier'], 'edge'], 0.9, 0.0],
+        // Zoom 8-10: Show Core + Edge + OLT
+        8, ['case', ['==', ['get', 'tier'], 'core'], 1.0, ['==', ['get', 'tier'], 'edge'], 0.9, ['==', ['get', 'tier'], 'olt'],  0.8, 0.0],
+        // Zoom 10+: Show everything (Add Access)
+        10, ['case', ['==', ['get', 'tier'], 'core'], 1.0, ['==', ['get', 'tier'], 'edge'], 0.9, ['==', ['get', 'tier'], 'olt'],  0.8, 0.6]
       ]);
       
+      // Inline the glow opacity so it doesn't crash from being called early
       map.addLayer({
         id: 'live-generic-glow',
         type: 'line',
         source: 'live-routes',
-        minzoom: 10,
         paint: {
-          'line-color': ['coalesce', ['get', 'tierColor'], '#4f46e5'],
+          'line-color': ['coalesce', ['get', 'statusColor'], '#22c55e'],
           'line-width': 12,
-          'line-opacity': 0.18,
           'line-blur': 8,
+          'line-opacity': [
+            'step', ['zoom'],
+            ['case', ['==', ['get', 'tier'], 'core'], 0.18, 0.0],
+            6, ['case', ['==', ['get', 'tier'], 'core'], 0.18, ['==', ['get', 'tier'], 'edge'], 0.18, 0.0],
+            8, ['case', ['==', ['get', 'tier'], 'core'], 0.18, ['==', ['get', 'tier'], 'edge'], 0.18, ['==', ['get', 'tier'], 'olt'], 0.15, 0.0],
+            10, ['case', ['==', ['get', 'tier'], 'core'], 0.18, ['==', ['get', 'tier'], 'edge'], 0.18, ['==', ['get', 'tier'], 'olt'], 0.15, 0.1]
+          ]
         }
       }, 'live-generic');
-
-
+      
       // path-highlight: two-layer glow + solid status-coloured line
       map.addSource('path-highlight', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
       map.addLayer({
@@ -327,14 +346,34 @@ export default function NetworkMap() {
         paint: { 'text-color': '#ffffff' },
       });
       
+      
       map.addLayer({
-        id: 'unclustered-main-devices', type: 'symbol', source: 'main-devices', filter: ['!', ['has', 'point_count']],
+        id: 'unclustered-main-devices', 
+        type: 'symbol', 
+        source: 'main-devices', 
         layout: {
           'icon-image': ['get', 'safeType'],
           'icon-size': 1.0, 'icon-allow-overlap': true, 'icon-ignore-placement': true,
           'text-field': ['get', 'name'], 'text-offset': [0, 1.6], 'text-size': 10, 'text-optional': true, 'text-font': ['Open Sans Regular', 'Arial Unicode MS Regular'],
         },
-        paint: { 'text-color': '#1e293b', 'text-halo-color': '#ffffff', 'text-halo-width': 1.5 },
+        paint: { 
+          'text-color': '#1e293b', 'text-halo-color': '#ffffff', 'text-halo-width': 1.5,
+          'icon-opacity': [
+            'step', ['zoom'],
+            // Zoom < 5: Only Core Routers
+            ['case', ['==', ['get', 'safeType'], 'core-router'], 1.0, 0.0],
+            // Zoom 5-7: Core + Edge Routers
+            5, ['case', ['==', ['get', 'safeType'], 'core-router'], 1.0, ['==', ['get', 'safeType'], 'edge-router'], 1.0, 0.0],
+            // Zoom 7+: Show all remaining infra (OLTs, etc)
+            7, 1.0
+          ],
+          'text-opacity': [
+            'step', ['zoom'],
+            ['case', ['==', ['get', 'safeType'], 'core-router'], 1.0, 0.0],
+            5, ['case', ['==', ['get', 'safeType'], 'core-router'], 1.0, ['==', ['get', 'safeType'], 'edge-router'], 1.0, 0.0],
+            7, 1.0
+          ]
+        },
       });
 
       function showStatsPopup(dev) {
@@ -431,13 +470,18 @@ export default function NetworkMap() {
             ...f,
             properties: {
               ...f.properties,
-              isInfra:     INFRA.has(fromType) || INFRA.has(toType),
+              isInfra: INFRA.has(fromType) && INFRA.has(toType),
               tier,
               tierColor:   TIER_COLOR[tier],
               statusColor: STATUS_COLOR[mockStatus(f.properties.id)] ?? TIER_COLOR[tier],
             }
           };
+
         });
+          liveRoutesRef.current.features.forEach(f =>
+          liveRouteMapRef.current.set(String(f.properties.id), f)
+        );
+        map.getSource('live-routes').setData(liveRoutesRef.current);
       }
 
       function getUpstreamPath(startId) {
@@ -464,7 +508,7 @@ export default function NetworkMap() {
         const { linkIds } = getUpstreamPath(deviceId);
         const features = linkIds.map(lid => {
           const color = STATUS_COLOR[mockStatus(lid)];
-          const existing = liveRoutesRef.current.features.find(f => String(f.properties.id) === lid);
+          const existing = liveRouteMapRef.current.get(lid);
           if (existing) {
             const safeColor = STATUS_COLOR[mockStatus(lid)] ?? (existing.properties.tierColor || '#4f46e5');
             return { ...existing, properties: { ...existing.properties, statusColor: safeColor } };
@@ -504,7 +548,8 @@ export default function NetworkMap() {
         if (liveRouteUpdateTimeout.current) return;
         liveRouteUpdateTimeout.current = setTimeout(() => {
             if (mapInstanceRef.current && mapInstanceRef.current.getSource('live-routes')) {
-                mapInstanceRef.current.getSource('live-routes').setData(liveRoutesRef.current);
+              liveRoutesRef.current.features = Array.from(liveRouteMapRef.current.values());
+              mapInstanceRef.current.getSource('live-routes').setData(liveRoutesRef.current);
             }
             liveRouteUpdateTimeout.current = null;
         }, 32); 
@@ -513,8 +558,7 @@ export default function NetworkMap() {
       function updateLiveRouteInMap(linkId, linkType, coordinates, props = {}) {
         const safeId = String(linkId);
         fetchedRouteIdsRef.current.add(safeId); 
-        const features = liveRoutesRef.current.features.filter(f => String(f.properties.id) !== safeId);
-        features.push({
+        const newFeature ={
           type: 'Feature',
           properties: (() => {
             const fType = devMap[String(props.from)]?.safeType || '';
@@ -533,9 +577,8 @@ export default function NetworkMap() {
             };
           })(),
           geometry: { type: 'LineString', coordinates }
-        });
-
-        liveRoutesRef.current.features = features;
+        };
+        liveRouteMapRef.current.set(safeId, newFeature);
         queueLiveRouteUpdate();
         modifiedRouteIdsRef.current.add(safeId);
       }
@@ -662,8 +705,14 @@ export default function NetworkMap() {
                refreshFilters(); 
             });
 
-            marker.on('drag', () => {
+            let _dragRaf = null;
+
+          marker.on('drag', () => {
+            if (_dragRaf) cancelAnimationFrame(_dragRaf);
+            _dragRaf = requestAnimationFrame(() => {
+              _dragRaf = null;
               const coords = marker.getLngLat();
+
               dev.lng = coords.lng; dev.lat = coords.lat;
               if (INFRA.has(dev.safeType)) {
                 updateAllDeviceSources();
@@ -689,9 +738,12 @@ export default function NetworkMap() {
                       });
                   }
                 }
+              })
+
+              map.getSource('drag-routes').setData({ type: 'FeatureCollection', features: dragFeatures });
+
               });
               
-              map.getSource('drag-routes').setData({ type: 'FeatureCollection', features: dragFeatures });
             });
 
             marker.on('dragend', async () => {
@@ -704,40 +756,44 @@ export default function NetworkMap() {
               map.getSource('drag-routes').setData({ type: 'FeatureCollection', features: [] });
 
               // Loop through ALL connections (both Infra and Customers)
-              await Promise.all(allConnections.map(async (link) => {
-                try {
-                  const isFrom = String(link.from) === strId;
-                  const otherDevId = isFrom ? String(link.to) : String(link.from);
-                  const otherDev = devMap[otherDevId];
-                  if (!otherDev) return;
+              const BATCH = 6;
+              for (let i = 0; i < allConnections.length; i += BATCH) {
+                await Promise.all(
+                  allConnections.slice(i, i + BATCH).map(async (link) => {
+                  try {
+                    const isFrom = String(link.from) === strId;
+                    const otherDevId = isFrom ? String(link.to) : String(link.from);
+                    const otherDev = devMap[otherDevId];
+                    if (!otherDev) return;
 
-                  const isOtherInfra = INFRA.has(otherDev.safeType);
-                  const isThisInfra = INFRA.has(dev.safeType);
-                  const hyphenatedId = `${link.from}-${link.to}`;
+                    const isOtherInfra = INFRA.has(otherDev.safeType);
+                    const isThisInfra = INFRA.has(dev.safeType);
+                    const hyphenatedId = `${link.from}-${link.to}`;
 
-                  // 1. Immediately update the map with a straight line to the new coordinates
-                  // This fixes the "ghost routes" by snapping all lines immediately
-                  updateLiveRouteInMap(link.id, link.type || 'generic',
-                      isFrom ? [[dev.lng, dev.lat], [otherDev.lng, otherDev.lat]] : [[otherDev.lng, otherDev.lat], [dev.lng, dev.lat]],
-                      { from: link.from, to: link.to, fromName: dev.name, toName: otherDev.name, isInfra: isThisInfra || isOtherInfra }
-                  );
+                    // 1. Immediately update the map with a straight line to the new coordinates
+                    // This fixes the "ghost routes" by snapping all lines immediately
+                    updateLiveRouteInMap(link.id, link.type || 'generic',
+                        isFrom ? [[dev.lng, dev.lat], [otherDev.lng, otherDev.lat]] : [[otherDev.lng, otherDev.lat], [dev.lng, dev.lat]],
+                        { from: link.from, to: link.to, fromName: dev.name, toName: otherDev.name, isInfra: isThisInfra && isOtherInfra }
+                    );
 
-                  // 2. If BOTH ends are infrastructure, fetch the real street route from backend
-                  if (isThisInfra && isOtherInfra) {
-                      const routeResponse = await fetchRoute(
-                        { lat: dev.lat, lng: dev.lng },
-                        { lat: otherDev.lat, lng: otherDev.lng },
-                        { link_id: hyphenatedId, link_type: link.type || 'generic' }
-                      );
-                      updateLiveRouteInMap(link.id, link.type || 'generic',
-                        toGeoJSON(routeResponse).geometry.coordinates,
-                        { from: link.from, to: link.to, fromName: dev.name, toName: otherDev.name, isInfra: true }
-                      );
+                    // 2. If BOTH ends are infrastructure, fetch the real street route from backend
+                    if (isThisInfra && isOtherInfra) {
+                        const routeResponse = await fetchRoute(
+                          { lat: dev.lat, lng: dev.lng },
+                          { lat: otherDev.lat, lng: otherDev.lng },
+                          { link_id: hyphenatedId, link_type: link.type || 'generic' }
+                        );
+                        updateLiveRouteInMap(link.id, link.type || 'generic',
+                          toGeoJSON(routeResponse).geometry.coordinates,
+                          { from: link.from, to: link.to, fromName: dev.name, toName: otherDev.name, isInfra: true }
+                        );
+                    }
+                  } catch (err) {
+                    console.error("Failed routing link:", link.id, err);
                   }
-                } catch (err) {
-                  console.error("Failed routing link:", link.id, err);
-                }
-              }));
+                
+              }))};
 
               // 3. Update the MapLibre Sources so the underlying WebGL dots actually move
               updateAllDeviceSources();
@@ -767,10 +823,11 @@ export default function NetworkMap() {
         }
 
         const infraLinks = candidates.filter(l => {
-            const fType = (devMap[String(l.from)]?.type || '').toLowerCase();
-            const tType = (devMap[String(l.to)]?.type || '').toLowerCase();
-            return INFRA.has(fType) || INFRA.has(tType);
-        }).slice(0, 20); 
+          const fType = devMap[String(l.from)]?.safeType || '';
+          const tType = devMap[String(l.to)]?.safeType   || '';
+          return INFRA.has(fType) || INFRA.has(tType);
+        }).slice(0, 20);
+
 
         if (infraLinks.length) {
           infraLinks.forEach(l => fetchedRouteIdsRef.current.add(String(l.id)));
@@ -813,6 +870,36 @@ export default function NetworkMap() {
       hideMarkers();
       clearUpstreamPath();
 
+      // Fetch backbone routes (core + edge) immediately on load so they're
+      // visible at country zoom, without waiting for the user to zoom to 12+.
+      const backboneLinks = links.filter(l => {
+        const fType = devMap[String(l.from)]?.safeType || '';
+        const tType = devMap[String(l.to)]?.safeType   || '';
+        return (fType === 'core-router' || tType === 'core-router' ||
+                fType === 'edge-router' || tType === 'edge-router') &&
+               !fetchedRouteIdsRef.current.has(String(l.id));
+      });
+      backboneLinks.forEach(l => fetchedRouteIdsRef.current.add(String(l.id)));
+      Promise.all(backboneLinks.map(async (link) => {
+        const from = devMap[String(link.from)], to = devMap[String(link.to)];
+        if (!from || !to) return;
+        try {
+          const res = await fetch('http://localhost:8000/api/route', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ a: { lat: from.lat, lng: from.lng }, b: { lat: to.lat, lng: to.lng },
+              link_id: `${link.from}-${link.to}`, link_type: link.type || 'generic' }),
+          });
+          if (!res.ok) throw new Error(res.status);
+          const coords = await res.json();
+          updateLiveRouteInMap(link.id, link.type || 'generic', coords.map(([lat, lng]) => [lng, lat]),
+            { from: link.from, to: link.to, fromName: from.name, toName: to.name, isInfra: true });
+        } catch {
+          updateLiveRouteInMap(link.id, 'generic', [[from.lng, from.lat], [to.lng, to.lat]],
+            { from: link.from, to: link.to, fromName: from.name, toName: to.name, isInfra: true });
+        }
+      })).then(() => refreshFilters());
+      
+
       let _showMarkersTimer = null;
       const debouncedShowMarkers = () => {
         clearTimeout(_showMarkersTimer);
@@ -823,7 +910,7 @@ export default function NetworkMap() {
       map.on('zoomend', () => { map.getZoom() >= 12 ? debouncedShowMarkers() : hideMarkers(); });
 
       map.on('click', (e) => {
-        const interactiveLayers = ['unclustered-main-devices', 'main-clusters', 'unclustered-devices'];
+        const interactiveLayers = ['unclustered-main-devices', 'unclustered-devices'];
         const activeLayers = interactiveLayers.filter(l => map.getLayer(l) && map.getLayoutProperty(l, 'visibility') !== 'none');
         
         if (activeLayers.length > 0) {
@@ -838,16 +925,6 @@ export default function NetworkMap() {
         if (map.getZoom() >= 12) { showMarkers(); } 
         else { hideMarkers(); }
       });
-
-      map.on('click', 'main-clusters', async (e) => {
-        const features = map.queryRenderedFeatures(e.point, { layers: ['main-clusters'] });
-        const clusterId = features[0].properties.cluster_id;
-        const zoom = await map.getSource('main-devices').getClusterExpansionZoom(clusterId);
-        map.easeTo({ center: features[0].geometry.coordinates, zoom });
-      });
-
-      map.on('mouseenter', 'main-clusters', () => { map.getCanvas().style.cursor = 'pointer'; });
-      map.on('mouseleave', 'main-clusters', () => { map.getCanvas().style.cursor = ''; });
 
     });   
     
