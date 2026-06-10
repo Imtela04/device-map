@@ -5,10 +5,23 @@ import { createMarker } from '../utils/createMarker';
 import { loadDeviceIcons } from '../utils/iconSprite';
 import { fetchRoute } from '../utils/fetchRoute';
 import { toGeoJSON } from '../utils/toGeoJSON';
-import Legend from './Legend';
 
 
 const INFRA = new Set(['core-router', 'router', 'edge-router', 'olt', 'server', 'switch']);
+const STATUS_COLOR = { online: '#22c55e', degraded: '#f59e0b', down: '#ef4444' };
+const DEVICE_LEVEL = {
+  'core-router': 4, 'router': 4, 'switch': 4, 'server': 4,
+  'edge-router': 3, 'olt': 2, 'access': 1
+};
+
+const TIER = { access: 0, olt: 1, 'edge-router': 2, 'core-router': 3 };
+const TIER_COLOR = {
+  core:   '#4f46e5',  // indigo     – national backbone
+  edge:   '#0891b2',  // cyan       – regional gateways
+  olt:    '#7c3aed',  // violet     – neighbourhood aggregators
+  access: '#c4b5fd',  // violet-300 – last-mile access / customers
+};
+
 
 export default function NetworkMap() {
   const mapRef                        = useRef(null);
@@ -21,10 +34,11 @@ export default function NetworkMap() {
   const focusedDeviceIdRef            = useRef(null);
   const fetchedRouteIdsRef            = useRef(new Set());
   const mainDevicesRef                = useRef([]);
-  const [stats, setStats]             = useState({ total: 0, online: 0, degraded: 0, down: 0 });
-  const searchRef                     = useRef(null);
+  const accessDevicesRef              = useRef([]);
   const showMarkersRef                = useRef(null);  
   const devMapRef                     = useRef({});    
+  const [stats, setStats]             = useState({ total: 0, online: 0, degraded: 0, down: 0 });
+
 
 
   // Helper Set to identify Infrastructure vs Customers
@@ -32,8 +46,13 @@ export default function NetworkMap() {
   useEffect(() => {
     if (mapInstanceRef.current) return;
 
-    let protocol = new Protocol();
-    maplibregl.addProtocol('pmtiles', protocol.tile);
+    // 1. Prevent Protocol Collision
+    try {
+      const protocol = new Protocol();
+      maplibregl.addProtocol('pmtiles', protocol.tile);
+    } catch (err) {
+      // Safely ignore if already registered
+    }
 
     const map = new maplibregl.Map({
       container: mapRef.current,
@@ -43,6 +62,7 @@ export default function NetworkMap() {
     });
 
     mapInstanceRef.current = map;
+    
     if (import.meta.env.DEV) {
       window.__map = map;
       window.maplibregl = maplibregl;
@@ -50,50 +70,68 @@ export default function NetworkMap() {
 
     map.addControl(new maplibregl.NavigationControl({ visualizePitch: false }), 'top-right');
     map.addControl(new maplibregl.ScaleControl({ unit: 'metric' }), 'bottom-left');
+    
     map.on('styleimagemissing', (e) => {
         map.addImage(e.id, new ImageData(1, 1));
     });
 
+    // 2. Track component mount state for async safety
+    let isMounted = true;
     map.on('load', async () => {
-      function mockStatus(id) {
-        const n = String(id).split('').reduce((a, c) => a + c.charCodeAt(0), 0);
-        return ['online','online','online','online','online','online','degraded','degraded','down','down'][n % 10];
-      }
+      try {
+        function mockStatus(id) { 
+          const n = String(id).split('').reduce((a, c) => a + c.charCodeAt(0), 0);
+          return ['online','online','online','online','online','online','degraded','degraded','down','down'][n % 10];
+        }
 
-      await loadDeviceIcons(map);
-      const toGeoJSONFeature = (device) => {
-        let renderType = 'Access';
-        const t = (device.type || '').toLowerCase();
-        if (t.includes('core')) renderType = 'Core Router';
-        else if (t.includes('edge')) renderType = 'Edge Router';
-        else if (t.includes('olt')) renderType = 'OLT';
+        await loadDeviceIcons(map).catch(e => console.error('❌ loadDeviceIcons failed:', e));
 
-        return {
-          type: 'Feature',
-          geometry: { type: 'Point', coordinates: [device.lng, device.lat] },
-          properties: { ...device, renderType, id: String(device.id) } 
+        const [apiDevices, rawLinks, dbRoutes] = await Promise.all([
+          fetch('http://localhost:8000/api/devices/infra').then(r => r.json()).catch(() => []),
+          fetch('http://localhost:8000/api/links/infra').then(r => r.json()).catch(() => []),
+          fetch('http://localhost:8000/api/routes/geojson').then(r => r.json()).catch(() => null)
+        ]);
+
+        // 3. Halt execution if component unmounted during the fetch
+        if (!isMounted) return;
+
+        const toGeoJSONFeature = (device) => {
+          let renderType = 'Access';
+          const t = (device.type || '').toLowerCase();
+          if (t.includes('core')) renderType = 'Core Router';
+          else if (t.includes('edge')) renderType = 'Edge Router';
+          else if (t.includes('olt')) renderType = 'OLT';
+
+          return {
+            type: 'Feature',
+            geometry: { type: 'Point', coordinates: [device.lng, device.lat] },
+            properties: { 
+              // 4. Safely extract primitive properties ONLY. 
+              // Spreading `...device` crashes the Web Worker if nested objects exist.
+              id: String(device.id), 
+              name: device.name || 'Unknown',
+              type: device.type,
+              safeType: device.safeType,
+              renderType
+            } 
+          };
         };
-      };
+        const links = rawLinks.map(l => ({ ...l, id: `${l.from}-${l.to}` }));
 
-      const [apiDevices, rawLinks, dbRoutes] = await Promise.all([
-        fetch('http://localhost:8000/api/devices').then(r => r.json()),
-        fetch('http://localhost:8000/api/links').then(r => r.json()),
-        fetch('http://localhost:8000/api/routes/geojson').then(r => r.json()).catch(() => null)
-      ]);
-
-      const links = rawLinks.map(l => ({ ...l, id: `${l.from}-${l.to}` }));
-
-      const devices = apiDevices.map(d => {
-        const t = (d.type || '').toLowerCase();
-        let safeType = 'access';
-        if (t.includes('core')) safeType = 'core-router';
-        else if (t.includes('edge')) safeType = 'edge-router';
-        else if (t.includes('olt')) safeType = 'olt';
-        else if (t.includes('server')) safeType = 'server';
-        else if (t.includes('switch')) safeType = 'switch';
-        else if (t === 'router') safeType = 'router';
-        return { ...d, safeType }; 
-      });
+        const devices = apiDevices
+          // 5. Prevent silent coordinate crashes 
+          .filter(d => typeof d.lng === 'number' && typeof d.lat === 'number')
+          .map(d => {
+            const t = (d.type || '').toLowerCase();
+            let safeType = 'access';
+            if (t.includes('core')) safeType = 'core-router';
+            else if (t.includes('edge')) safeType = 'edge-router';
+            else if (t.includes('olt')) safeType = 'olt';
+            else if (t.includes('server')) safeType = 'server';
+            else if (t.includes('switch')) safeType = 'switch';
+            else if (t === 'router') safeType = 'router';
+            return { ...d, safeType }; 
+          });
 
       if (dbRoutes?.features?.length) {
         liveRoutesRef.current.features = dbRoutes.features.map(f => ({
@@ -120,16 +158,13 @@ export default function NetworkMap() {
       );
 
 
-      const devMap = {};
       const linkMap = {};
       const ObjectLinksByDevice = {};
+      const devMap = {};
       
       devices.forEach(d => {
-        const strId = String(d.id);
-        devMap[strId] = d;
-        ObjectLinksByDevice[strId] = [];
-      });
-
+        devMap[String(d.id)] = d;
+      });      
       devMapRef.current = devMap; 
 
       links.forEach(l => {
@@ -141,7 +176,97 @@ export default function NetworkMap() {
         ObjectLinksByDevice[fromId].push(l);
         ObjectLinksByDevice[toId].push(l);
       });
-      
+
+      const fetchedViewportRef = new Set();
+
+      async function fetchViewportCustomers() {
+        const bounds = map.getBounds();
+        // Grid cell key — coarse enough to avoid refetch on tiny pans (~25km cells)
+        const G = 0.25;
+        const key = [
+          Math.floor(bounds.getWest()  / G),
+          Math.floor(bounds.getSouth() / G),
+          Math.ceil(bounds.getEast()   / G),
+          Math.ceil(bounds.getNorth()  / G),
+        ].join(',');
+        if (fetchedViewportRef.has(key)) return;
+        fetchedViewportRef.add(key);
+
+        const { _sw: sw, _ne: ne } = bounds;
+        const q = `west=${bounds.getWest()}&south=${bounds.getSouth()}&east=${bounds.getEast()}&north=${bounds.getNorth()}`;
+
+        const [viewDevices, viewLinks] = await Promise.all([
+          fetch(`http://localhost:8000/api/devices/viewport?${q}`).then(r => r.json()).catch(() => []),
+          fetch(`http://localhost:8000/api/links/viewport?${q}`).then(r => r.json()).catch(() => []),
+        ]);
+
+        viewDevices.forEach(d => {
+          const strId = String(d.id);
+          if (!devMapRef.current[strId]) {
+            devMapRef.current[strId] = { ...d, safeType: 'access' };
+            accessDevicesRef.current.push({ ...d, safeType: 'access' });
+          }
+        });
+
+        viewLinks.forEach(l => {
+          const lid = `${l.from}-${l.to}`;
+          const fromId = String(l.from), toId = String(l.to);
+          const fromDev = devMapRef.current[fromId], toDev = devMapRef.current[toId];
+
+          if (!ObjectLinksByDevice[fromId]) ObjectLinksByDevice[fromId] = [];
+          if (!ObjectLinksByDevice[toId])   ObjectLinksByDevice[toId]   = [];
+          if (!ObjectLinksByDevice[fromId].find(x => String(x.id) === lid))
+            ObjectLinksByDevice[fromId].push({ ...l, id: lid });
+          if (!ObjectLinksByDevice[toId].find(x => String(x.id) === lid))
+            ObjectLinksByDevice[toId].push({ ...l, id: lid });
+
+          if (fromDev && toDev && !liveRouteMapRef.current.has(lid)) {
+            liveRouteMapRef.current.set(lid, {
+              type: 'Feature',
+              properties: {
+                id: lid, type: l.type || 'generic',
+                from: fromId, to: toId,
+                tier: 'access',
+                tierColor: TIER_COLOR.access,
+                statusColor: STATUS_COLOR[mockStatus(lid)] ?? TIER_COLOR.access,
+              },
+              geometry: { type: 'LineString', coordinates: [[fromDev.lng, fromDev.lat], [toDev.lng, toDev.lat]] }
+            });
+          }
+        });
+
+        queueLiveRouteUpdate();
+        showMarkers();
+      }
+      // Straight-line placeholders for INFRA-connected links only.
+      // Access (customer→OLT) links are invisible until zoom ≥ 10 and are
+      // loaded lazily per-viewport in showMarkers() to keep setData payloads small.
+      const existingRouteIds = new Set(liveRoutesRef.current.features.map(f => String(f.properties.id)));
+
+      links.forEach(l => {
+        const lid = String(l.id);
+        if (!existingRouteIds.has(lid)) {
+          const fromDev = devMap[String(l.from)];
+          const toDev   = devMap[String(l.to)];
+          const fType   = fromDev?.safeType || '';
+          const tType   = toDev?.safeType   || '';
+          // Guard: skip pure access links (neither end is infra)
+          if (fromDev && toDev && (INFRA.has(fType) || INFRA.has(tType))) {
+            liveRoutesRef.current.features.push({
+              type: 'Feature',
+              properties: { 
+                id: lid, type: l.type || 'generic', 
+                from: String(l.from), to: String(l.to), 
+                fromName: fromDev.name, toName: toDev.name 
+              },
+              geometry: { type: 'LineString', coordinates: [[fromDev.lng, fromDev.lat], [toDev.lng, toDev.lat]] }
+            });
+
+          }
+        }
+      });
+      // ----------------------
+
       const statuses = links.map(l => mockStatus(l.id));
       setStats({
         total: links.length,
@@ -161,11 +286,7 @@ export default function NetworkMap() {
         }
       });
       
-      map.addSource('devices', {
-        type: 'geojson',
-        data: { type: 'FeatureCollection', features: accessDevices.map(toGeoJSONFeature) }
-      });
-
+      accessDevicesRef.current = accessDevices;
 
       map.addSource('main-devices', {
         type: 'geojson',
@@ -219,11 +340,38 @@ export default function NetworkMap() {
           popup.remove();
         });
       };
-      
+    
+      // Calculate Tiers and Colors FOR ALL ROUTES before handing them to MapLibre
+      if (liveRoutesRef.current.features.length) {
+        liveRoutesRef.current.features = liveRoutesRef.current.features.map(f => {
+          const fromType = devMap[String(f.properties.from)]?.safeType || '';
+          const toType   = devMap[String(f.properties.to)]?.safeType   || '';
+          const linkLevel = Math.min(
+            DEVICE_LEVEL[fromType] || 1,
+            DEVICE_LEVEL[toType]   || 1
+          );
+
+          const tier = linkLevel >= 4 ? 'core'
+           : linkLevel === 3 ? 'edge'
+           : linkLevel === 2 ? 'olt'
+           : 'access';
+
+          return {
+            ...f,
+            properties: {
+              ...f.properties,
+              isInfra: INFRA.has(fromType) || INFRA.has(toType),
+              statusColor: STATUS_COLOR[mockStatus(f.properties.id)],
+              tier: tier,
+            }
+          };
+        });
+      }
+
       if (!map.getSource('live-routes')) {
           map.addSource('live-routes', { type: 'geojson', data: liveRoutesRef.current });
       }
-      if (!map.getSource('drag-routes')) {
+         if (!map.getSource('drag-routes')) {
           map.addSource('drag-routes', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
           map.addLayer({
             id: 'drag-routes-line', type: 'line', source: 'drag-routes',
@@ -257,7 +405,7 @@ export default function NetworkMap() {
         // Zoom 8-10: Show Core + Edge + OLT
         8, ['case', ['==', ['get', 'tier'], 'core'], 1.0, ['==', ['get', 'tier'], 'edge'], 0.9, ['==', ['get', 'tier'], 'olt'],  0.8, 0.0],
         // Zoom 10+: Show everything (Add Access)
-        10, ['case', ['==', ['get', 'tier'], 'core'], 1.0, ['==', ['get', 'tier'], 'edge'], 0.9, ['==', ['get', 'tier'], 'olt'],  0.8, 0.6]
+        10, ['case', ['==', ['get', 'tier'], 'core'], 1.0, ['==', ['get', 'tier'], 'edge'], 0.9, ['==', ['get', 'tier'], 'olt'],  0.8, 0.0]
       ]);
       
       // Inline the glow opacity so it doesn't crash from being called early
@@ -274,7 +422,7 @@ export default function NetworkMap() {
             ['case', ['==', ['get', 'tier'], 'core'], 0.18, 0.0],
             6, ['case', ['==', ['get', 'tier'], 'core'], 0.18, ['==', ['get', 'tier'], 'edge'], 0.18, 0.0],
             8, ['case', ['==', ['get', 'tier'], 'core'], 0.18, ['==', ['get', 'tier'], 'edge'], 0.18, ['==', ['get', 'tier'], 'olt'], 0.15, 0.0],
-            10, ['case', ['==', ['get', 'tier'], 'core'], 0.18, ['==', ['get', 'tier'], 'edge'], 0.18, ['==', ['get', 'tier'], 'olt'], 0.15, 0.1]
+            10, ['case', ['==', ['get', 'tier'], 'core'], 0.18, ['==', ['get', 'tier'], 'edge'], 0.18, ['==', ['get', 'tier'], 'olt'], 0.15, 0.0]
           ]
         }
       }, 'live-generic');
@@ -290,32 +438,6 @@ export default function NetworkMap() {
         paint: { 'line-color': ['coalesce', ['get', 'statusColor'], '#4f46e5'], 'line-width': 3.5, 'line-opacity': 1 }
       });
 
-      // --- VISUAL HIERARCHY FOR CUSTOMER DOTS ---
-      map.addLayer({
-        id: 'unclustered-devices',
-        type: 'circle',
-        source: 'devices',
-        minzoom: 13,
-        filter: ['!', ['has', 'point_count']],
-        paint: {
-          'circle-color': '#f63bbe',
-          'circle-radius': ['interpolate', ['linear'], ['zoom'], 13, 3, 16, 5],
-          'circle-stroke-width': 1,
-          'circle-stroke-color': '#ffffff',
-          'circle-opacity': ['interpolate', ['linear'], ['zoom'], 13, 0.6, 15, 0.9]
-        }
-      });
-      
-      map.on('click', 'unclustered-devices', (e) => {
-          const featureId = e.features[0].properties.id; 
-          popup.remove();
-          focusedDeviceIdRef.current = featureId;
-          showMarkers(); 
-          showUpstreamPath(featureId);
-          
-          const dev = devMap[String(featureId)];
-          if (dev) showStatsPopup(dev);
-      });      
 
       map.on('click', 'unclustered-main-devices', (e) => {
         const featureId = e.features[0].properties.id;
@@ -335,17 +457,7 @@ export default function NetworkMap() {
       });
       map.on('mouseenter', 'unclustered-main-devices', () => { map.getCanvas().style.cursor = 'pointer'; });
       map.on('mouseleave', 'unclustered-main-devices', () => { map.getCanvas().style.cursor = ''; });
-  
-      map.addLayer({
-        id: 'main-clusters', type: 'circle', source: 'main-devices', filter: ['has', 'point_count'],
-        paint: { 'circle-color': '#7c3aed', 'circle-radius': ['step', ['get', 'point_count'], 13, 10, 17, 50, 21], 'circle-stroke-width': 2, 'circle-stroke-color': '#ffffff' },
-      });
-      map.addLayer({
-        id: 'main-cluster-count', type: 'symbol', source: 'main-devices', filter: ['has', 'point_count'],
-        layout: { 'text-field': '{point_count_abbreviated}', 'text-size': 11, 'text-font': ['Open Sans Bold', 'Arial Unicode MS Bold'] },
-        paint: { 'text-color': '#ffffff' },
-      });
-      
+       
       
       map.addLayer({
         id: 'unclustered-main-devices', 
@@ -439,50 +551,7 @@ export default function NetworkMap() {
           `)
           .addTo(map);
       }
-
-      const TIER = { access: 0, olt: 1, 'edge-router': 2, 'core-router': 3 };
-
-      // Single source of truth for all route colours.
-      // TIER_COLOR = base colour showing network hierarchy on a healthy network.
-      // STATUS_COLOR = null means "healthy → fall back to tier colour".
-      //   Amber/red only appear when something is actually wrong, so alerts stand out.
-      const TIER_COLOR = {
-        core:   '#4f46e5',  // indigo     – national backbone
-        edge:   '#0891b2',  // cyan       – regional gateways
-        olt:    '#7c3aed',  // violet     – neighbourhood aggregators
-        access: '#c4b5fd',  // violet-300 – last-mile access / customers
-      };
-      const STATUS_COLOR = {
-        online:   null,        // healthy → use TIER_COLOR[tier]
-        degraded: '#f59e0b',   // amber
-        down:     '#ef4444',   // red
-      };
-      if (liveRoutesRef.current.features.length) {
-        liveRoutesRef.current.features = liveRoutesRef.current.features.map(f => {
-          const fromType = devMap[String(f.properties.from)]?.safeType || '';
-          const toType   = devMap[String(f.properties.to)]?.safeType   || '';
-          const tier =
-            fromType === 'core-router' || toType === 'core-router' ? 'core'
-            : fromType === 'edge-router' || toType === 'edge-router' ? 'edge'
-            : fromType === 'olt'         || toType === 'olt'         ? 'olt'
-            : 'access';
-          return {
-            ...f,
-            properties: {
-              ...f.properties,
-              isInfra: INFRA.has(fromType) && INFRA.has(toType),
-              tier,
-              tierColor:   TIER_COLOR[tier],
-              statusColor: STATUS_COLOR[mockStatus(f.properties.id)] ?? TIER_COLOR[tier],
-            }
-          };
-
-        });
-          liveRoutesRef.current.features.forEach(f =>
-          liveRouteMapRef.current.set(String(f.properties.id), f)
-        );
-        map.getSource('live-routes').setData(liveRoutesRef.current);
-      }
+  
 
       function getUpstreamPath(startId) {
         const linkIds = [], deviceIds = [];
@@ -520,11 +589,16 @@ export default function NetworkMap() {
           if (!from || !to) return null;
           const fType  = devMap[String(link.from)]?.safeType || '';
           const tType  = devMap[String(link.to)]?.safeType   || '';
-          const tier   =
-            fType === 'core-router' || tType === 'core-router' ? 'core'
-            : fType === 'edge-router' || tType === 'edge-router' ? 'edge'
-            : fType === 'olt'         || tType === 'olt'         ? 'olt'
-            : 'access';
+
+          const linkLevel = Math.min(
+            DEVICE_LEVEL[fType] || 1,
+            DEVICE_LEVEL[tType]   || 1
+          );
+          const tier = linkLevel >= 4 ? 'core'
+                    : linkLevel === 3 ? 'edge'
+                    : linkLevel === 2 ? 'olt'
+                    : 'access';
+
           const tColor = TIER_COLOR[tier];
           return {
             type: 'Feature',
@@ -547,12 +621,24 @@ export default function NetworkMap() {
       function queueLiveRouteUpdate() {
         if (liveRouteUpdateTimeout.current) return;
         liveRouteUpdateTimeout.current = setTimeout(() => {
-            if (mapInstanceRef.current && mapInstanceRef.current.getSource('live-routes')) {
-              liveRoutesRef.current.features = Array.from(liveRouteMapRef.current.values());
-              mapInstanceRef.current.getSource('live-routes').setData(liveRoutesRef.current);
-            }
-            liveRouteUpdateTimeout.current = null;
-        }, 32); 
+          const m = mapInstanceRef.current;
+          if (!m?.getSource('live-routes')) { liveRouteUpdateTimeout.current = null; return; }
+          const zoom = m.getZoom();
+          // Mirror the line-opacity zoom steps: only pass features MapLibre would
+          // render at this zoom. Keeps the setData payload proportional to what's
+          // actually visible regardless of how large liveRouteMapRef grows.
+          const features = [];
+          for (const f of liveRouteMapRef.current.values()) {
+            const tier = f.properties?.tier;
+            if (zoom <  6 && tier !== 'core')                                        continue;
+            if (zoom <  8 && tier !== 'core' && tier !== 'edge')                     continue;
+            if (zoom < 10 && tier !== 'core' && tier !== 'edge' && tier !== 'olt')   continue;
+            features.push(f);
+          }
+          liveRoutesRef.current.features = features;
+          m.getSource('live-routes').setData(liveRoutesRef.current);
+          liveRouteUpdateTimeout.current = null;
+        }, 100);
       }
 
       function updateLiveRouteInMap(linkId, linkType, coordinates, props = {}) {
@@ -563,11 +649,15 @@ export default function NetworkMap() {
           properties: (() => {
             const fType = devMap[String(props.from)]?.safeType || '';
             const tType = devMap[String(props.to)]?.safeType   || '';
-            const tier =
-              fType === 'core-router' || tType === 'core-router' ? 'core'
-              : fType === 'edge-router' || tType === 'edge-router' ? 'edge'
-              : fType === 'olt'         || tType === 'olt'         ? 'olt'
-              : 'access';
+            const linkLevel = Math.min(
+              DEVICE_LEVEL[fType] || 1,
+              DEVICE_LEVEL[tType]   || 1
+            );
+            const tier = linkLevel >= 4 ? 'core'
+                      : linkLevel === 3 ? 'edge'
+                      : linkLevel === 2 ? 'olt'
+                      : 'access';
+
             return {
               id: safeId, type: linkType, ...props,
               from: String(props.from), to: String(props.to),
@@ -600,35 +690,31 @@ export default function NetworkMap() {
           map.getSource('main-devices').setData({ type: 'FeatureCollection', features: mainFeatures });
         }
       }
+
       function refreshFilters() {
         const focusId = focusedDeviceIdRef.current;
-        const focusedDev = focusId ? devMapRef.current[String(focusId)] : null;
-        const isFocusInfra = focusedDev ? INFRA.has(focusedDev.safeType) : false;
-
-        let liveFilter = ['==', ['get', 'isInfra'], true];
-
-        if (focusId && !isFocusInfra) {
-          const customerLinkIds = (ObjectLinksByDevice[String(focusId)] || []).map(l => String(l.id));
-          liveFilter = [
-            'any',
-            ['==', ['get', 'isInfra'], true],
-            ['in', ['to-string', ['get', 'id']], ['literal', customerLinkIds]]
-          ];
-        }
-
-        if (map.getLayer('live-generic')) map.setFilter('live-generic', liveFilter);
-        if (map.getLayer('live-generic-glow')) map.setFilter('live-generic-glow', liveFilter);
 
         if (focusId) {
+          // USER CLICKED A DEVICE: Show ONLY the routes connected to this specific device
+          const connectedLinkIds = (ObjectLinksByDevice[String(focusId)] || []).map(l => String(l.id));
+          const focusFilter = ['in', ['to-string', ['get', 'id']], ['literal', connectedLinkIds]];
+
+          if (map.getLayer('live-generic')) map.setFilter('live-generic', focusFilter);
+          if (map.getLayer('live-generic-glow')) map.setFilter('live-generic-glow', focusFilter);
+
+          // Hide the focused device's WebGL dot so the popup HTML marker doesn't look messy
           if (map.getLayer('unclustered-main-devices')) {
             map.setFilter('unclustered-main-devices', ['!=', ['to-string', ['get', 'id']], String(focusId)]);
           }
-          if (map.getLayer('unclustered-devices')) {
-            map.setFilter('unclustered-devices', ['all', ['!', ['has', 'point_count']], ['!=', ['to-string', ['get', 'id']], String(focusId)]]);
-          }
         } else {
+          // NO DEVICE FOCUSED: Show ALL routes natively. 
+          // (Our line-opacity zoom steps will naturally hide the customer routes at country-level)
+          if (map.getLayer('live-generic')) map.setFilter('live-generic', null);
+          if (map.getLayer('live-generic-glow')) map.setFilter('live-generic-glow', null);
+
+          // Restore all device dots
           if (map.getLayer('unclustered-main-devices')) map.setFilter('unclustered-main-devices', null);
-          if (map.getLayer('unclustered-devices')) map.setFilter('unclustered-devices', ['!', ['has', 'point_count']]);
+          if (map.getLayer('unclustered-devices')) map.setFilter('unclustered-devices', null);
         }
       }
 
@@ -643,14 +729,27 @@ export default function NetworkMap() {
             connectedLinks.map(l => String(l.from) === String(focusId) ? String(l.to) : String(l.from))
           );
           neighborIds.add(String(focusId));
-          devicesToRender = devices.filter(d => neighborIds.has(String(d.id)));
+          // Cap access neighbors — OLTs can have 600+ customer downlinks and
+          // creating that many Marker instances in one frame causes severe lag.
+          const infraNeighbors  = devices.filter(d => neighborIds.has(String(d.id)) && INFRA.has(d.safeType));
+          const accessNeighbors = devices.filter(d => neighborIds.has(String(d.id)) && !INFRA.has(d.safeType)).slice(0, 50);
+          devicesToRender = [...infraNeighbors, ...accessNeighbors];
         } else {
-          devicesToRender = mainDevicesRef.current.filter(dev =>
-            dev.lng >= bounds.getWest() && dev.lng <= bounds.getEast() &&
-            dev.lat >= bounds.getSouth() && dev.lat <= bounds.getNorth()
+          const w = bounds.getWest(), e = bounds.getEast();
+          const s = bounds.getSouth(), n = bounds.getNorth();
+          const infraInView = mainDevicesRef.current.filter(
+            dev => dev.lng >= w && dev.lng <= e && dev.lat >= s && dev.lat <= n
           );
-        }
-        
+          // Access devices are invisible below zoom 12 — only load them when
+          // DOM markers are active, capped to keep DOM node count manageable.
+          const accessInView = map.getZoom() >= 12
+            ? accessDevicesRef.current.filter(
+                dev => dev.lng >= w && dev.lng <= e && dev.lat >= s && dev.lat <= n
+              ).slice(0, 400)
+            : [];
+          devicesToRender = [...infraInView, ...accessInView];
+        }        
+
         ['links-generic', 'live-generic', 'live-generic-glow'].forEach(id => {
           if (map.getLayer(id)) map.setLayoutProperty(id, 'visibility', 'visible');
         });
@@ -662,24 +761,17 @@ export default function NetworkMap() {
 
         const visibleIds = new Set(devicesToRender.map(d => String(d.id)));
 
-        // 1. Cleanup off-screen markers or unfocused customers
         for (const [id, marker] of activeMarkersRef.current.entries()) {
-            const isInfra = INFRA.has(devMap[id]?.safeType || '');
-            const isFocused = id === String(focusedDeviceIdRef.current);
-            if (!visibleIds.has(id) || (!isInfra && !isFocused)) {
+            if (!visibleIds.has(id)) {
                 marker.remove();
                 activeMarkersRef.current.delete(id);
             }
         }
 
-        // 2. Generate HTML markers AND assign all drag logic in ONE unified loop
         devicesToRender.forEach(dev => {
           const strId = String(dev.id);
           const isInfra = INFRA.has(dev.safeType);
-          const isFocused = strId === String(focusedDeviceIdRef.current);
-          
-          if (!isInfra && !isFocused) return; 
-          
+
           if (!activeMarkersRef.current.has(strId)) {
             const marker = createMarker(dev, map);  
             const status = mockStatus(dev.id);
@@ -694,7 +786,7 @@ export default function NetworkMap() {
 
             marker.getElement().addEventListener('click', (e) => {
               e.stopPropagation();
-              focusedDeviceIdRef.current = dev.id;
+              focusedDeviceIdRef.current = String(dev.id);
               showMarkers(); 
               showStatsPopup(dev); 
             });
@@ -714,10 +806,6 @@ export default function NetworkMap() {
               const coords = marker.getLngLat();
 
               dev.lng = coords.lng; dev.lat = coords.lat;
-              if (INFRA.has(dev.safeType)) {
-                updateAllDeviceSources();
-                refreshFilters();
-              }
 
               const affected = ObjectLinksByDevice[strId] || [];
               const dragFeatures = [];
@@ -755,51 +843,53 @@ export default function NetworkMap() {
               // Clear the temporary red dragging line
               map.getSource('drag-routes').setData({ type: 'FeatureCollection', features: [] });
 
-              // Loop through ALL connections (both Infra and Customers)
+              // Only process infra↔infra connections. Adding access links (customer→OLT)
+              // to liveRouteMapRef floods it with hundreds of entries and causes cascading
+              // setData calls that lock the browser. The drag-routes layer already handles
+              // customer link visuals during the drag gesture — they need nothing more.
+              const infraConnections = allConnections.filter(l => {
+                const otherId = String(l.from) === strId ? String(l.to) : String(l.from);
+                return INFRA.has(devMap[otherId]?.safeType);
+              });
+
               const BATCH = 6;
-              for (let i = 0; i < allConnections.length; i += BATCH) {
+              for (let i = 0; i < infraConnections.length; i += BATCH) {
                 await Promise.all(
-                  allConnections.slice(i, i + BATCH).map(async (link) => {
-                  try {
-                    const isFrom = String(link.from) === strId;
-                    const otherDevId = isFrom ? String(link.to) : String(link.from);
-                    const otherDev = devMap[otherDevId];
-                    if (!otherDev) return;
+                  infraConnections.slice(i, i + BATCH).map(async (link) => {
+                    try {
+                      const isFrom      = String(link.from) === strId;
+                      const otherDevId  = isFrom ? String(link.to) : String(link.from);
+                      const otherDev    = devMap[otherDevId];
+                      if (!otherDev) return;
 
-                    const isOtherInfra = INFRA.has(otherDev.safeType);
-                    const isThisInfra = INFRA.has(dev.safeType);
-                    const hyphenatedId = `${link.from}-${link.to}`;
+                      const hyphenatedId = `${link.from}-${link.to}`;
 
-                    // 1. Immediately update the map with a straight line to the new coordinates
-                    // This fixes the "ghost routes" by snapping all lines immediately
-                    updateLiveRouteInMap(link.id, link.type || 'generic',
-                        isFrom ? [[dev.lng, dev.lat], [otherDev.lng, otherDev.lat]] : [[otherDev.lng, otherDev.lat], [dev.lng, dev.lat]],
-                        { from: link.from, to: link.to, fromName: dev.name, toName: otherDev.name, isInfra: isThisInfra && isOtherInfra }
-                    );
+                      // Snap to straight line immediately, then overwrite with OSRM road route
+                      updateLiveRouteInMap(link.id, link.type || 'generic',
+                        isFrom
+                          ? [[dev.lng, dev.lat], [otherDev.lng, otherDev.lat]]
+                          : [[otherDev.lng, otherDev.lat], [dev.lng, dev.lat]],
+                        { from: link.from, to: link.to, fromName: dev.name, toName: otherDev.name, isInfra: true }
+                      );
 
-                    // 2. If BOTH ends are infrastructure, fetch the real street route from backend
-                    if (isThisInfra && isOtherInfra) {
-                        const routeResponse = await fetchRoute(
-                          { lat: dev.lat, lng: dev.lng },
-                          { lat: otherDev.lat, lng: otherDev.lng },
-                          { link_id: hyphenatedId, link_type: link.type || 'generic' }
-                        );
-                        updateLiveRouteInMap(link.id, link.type || 'generic',
-                          toGeoJSON(routeResponse).geometry.coordinates,
-                          { from: link.from, to: link.to, fromName: dev.name, toName: otherDev.name, isInfra: true }
-                        );
+                      const routeResponse = await fetchRoute(
+                        { lat: dev.lat, lng: dev.lng },
+                        { lat: otherDev.lat, lng: otherDev.lng },
+                        { link_id: hyphenatedId, link_type: link.type || 'generic' }
+                      );
+                      updateLiveRouteInMap(link.id, link.type || 'generic',
+                        toGeoJSON(routeResponse).geometry.coordinates,
+                        { from: link.from, to: link.to, fromName: dev.name, toName: otherDev.name, isInfra: true }
+                      );
+                    } catch (err) {
+                      console.error('Failed routing link:', link.id, err);
                     }
-                  } catch (err) {
-                    console.error("Failed routing link:", link.id, err);
-                  }
-                
-              }))};
-
-              // 3. Update the MapLibre Sources so the underlying WebGL dots actually move
+                  })
+                );
+              }
               updateAllDeviceSources();
               refreshFilters();
 
-              // 4. Save to Database
               fetch(`http://localhost:8000/api/devices/${dev.id}`, {
                 method: 'PATCH',
                 headers: { 'Content-Type': 'application/json' },
@@ -809,7 +899,6 @@ export default function NetworkMap() {
           }
         });
 
-        // 3. Batch Initial OSRM loading for visible infra on Pan
         const seenLinkIds = new Set();
         const candidates = [];
         for (const id of visibleIds) {
@@ -850,6 +939,7 @@ export default function NetworkMap() {
             }
           })).then(() => refreshFilters());
         }
+        
       }
 
       showMarkersRef.current = showMarkers;
@@ -861,14 +951,14 @@ export default function NetworkMap() {
         activeMarkersRef.current.clear();
         focusedDeviceIdRef.current = null; 
 
-      ['main-clusters', 'main-cluster-count', 'unclustered-main-devices']
+      ['unclustered-main-devices']
         .forEach(id => { if (map.getLayer(id)) map.setLayoutProperty(id, 'visibility', 'visible'); });
         if (map.getLayer('unclustered-main-devices')) map.setFilter('unclustered-main-devices', null);
-        if (map.getLayer('unclustered-devices')) map.setFilter('unclustered-devices', ['!', ['has', 'point_count']]);
       }      
 
       hideMarkers();
       clearUpstreamPath();
+      refreshFilters();
 
       // Fetch backbone routes (core + edge) immediately on load so they're
       // visible at country zoom, without waiting for the user to zoom to 12+.
@@ -879,35 +969,100 @@ export default function NetworkMap() {
                 fType === 'edge-router' || tType === 'edge-router') &&
                !fetchedRouteIdsRef.current.has(String(l.id));
       });
+
       backboneLinks.forEach(l => fetchedRouteIdsRef.current.add(String(l.id)));
-      Promise.all(backboneLinks.map(async (link) => {
-        const from = devMap[String(link.from)], to = devMap[String(link.to)];
+      // ── STRAIGHT-LINE PLACEHOLDERS ──────────────────────────────────────────
+      // Paint all backbone + OLT links as straight lines immediately.
+      // OSRM road-snapped routes will overwrite these as requests resolve.
+      // This makes the full network visible at country zoom the instant data loads.
+      const oltLinks = links.filter(l => {
+        const fType = devMap[String(l.from)]?.safeType || '';
+        const tType = devMap[String(l.to)]?.safeType   || '';
+        return (fType === 'olt' || tType === 'olt') &&
+              INFRA.has(fType) && INFRA.has(tType) &&
+              !fetchedRouteIdsRef.current.has(String(l.id));
+      });
+      oltLinks.forEach(l => fetchedRouteIdsRef.current.add(String(l.id)));
+
+      [...backboneLinks, ...oltLinks].forEach(link => {
+        const from = devMap[String(link.from)];
+        const to   = devMap[String(link.to)];
         if (!from || !to) return;
-        try {
-          const res = await fetch('http://localhost:8000/api/route', {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ a: { lat: from.lat, lng: from.lng }, b: { lat: to.lat, lng: to.lng },
-              link_id: `${link.from}-${link.to}`, link_type: link.type || 'generic' }),
-          });
-          if (!res.ok) throw new Error(res.status);
-          const coords = await res.json();
-          updateLiveRouteInMap(link.id, link.type || 'generic', coords.map(([lat, lng]) => [lng, lat]),
-            { from: link.from, to: link.to, fromName: from.name, toName: to.name, isInfra: true });
-        } catch {
-          updateLiveRouteInMap(link.id, 'generic', [[from.lng, from.lat], [to.lng, to.lat]],
-            { from: link.from, to: link.to, fromName: from.name, toName: to.name, isInfra: true });
-        }
-      })).then(() => refreshFilters());
-      
+        const fType = from.safeType || '';
+        const tType = to.safeType   || '';
+        const tier  =
+          fType === 'core-router' || tType === 'core-router' ? 'core'
+          : fType === 'edge-router' || tType === 'edge-router' ? 'edge'
+          : 'olt';
+        liveRouteMapRef.current.set(String(link.id), {
+          type: 'Feature',
+          properties: {
+            id: String(link.id), type: link.type || 'generic',
+            from: String(link.from), to: String(link.to),
+            fromName: from.name, toName: to.name,
+            isInfra: true, tier,
+            tierColor:   TIER_COLOR[tier],
+            statusColor: STATUS_COLOR[mockStatus(link.id)] ?? TIER_COLOR[tier],
+          },
+          geometry: { type: 'LineString', coordinates: [[from.lng, from.lat], [to.lng, to.lat]] }
+        });
+      });
+      liveRoutesRef.current.features = Array.from(liveRouteMapRef.current.values());
+      map.getSource('live-routes').setData(liveRoutesRef.current);
+      refreshFilters();
+      // ────────────────────────────────────────────────────────────────────────
+
+      const BB_BATCH = 25;
+      for (let i = 0; i < backboneLinks.length; i += BB_BATCH) {
+        await Promise.all(
+          backboneLinks.slice(i, i + BB_BATCH).map(async (link) => {
+            const from = devMap[String(link.from)], to = devMap[String(link.to)];
+            if (!from || !to) return;
+            const ctrl = new AbortController();
+            const timer = setTimeout(() => ctrl.abort(), 8000);
+            try {
+              const res = await fetch('http://localhost:8000/api/route', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ a: { lat: from.lat, lng: from.lng }, b: { lat: to.lat, lng: to.lng },
+                  link_id: `${link.from}-${link.to}`, link_type: link.type || 'generic' }),
+                signal: ctrl.signal,
+              });
+              if (!res.ok) throw new Error(res.status);
+              const coords = await res.json();
+              updateLiveRouteInMap(link.id, link.type || 'generic', coords.map(([lat, lng]) => [lng, lat]),
+                { from: link.from, to: link.to, fromName: from.name, toName: to.name, isInfra: true });
+            } catch {
+              updateLiveRouteInMap(link.id, 'generic', [[from.lng, from.lat], [to.lng, to.lat]],
+                { from: link.from, to: link.to, fromName: from.name, toName: to.name, isInfra: true });
+            } finally {
+              clearTimeout(timer);
+            }
+          })
+        );
+      }
+      refreshFilters();
+
 
       let _showMarkersTimer = null;
-      const debouncedShowMarkers = () => {
-        clearTimeout(_showMarkersTimer);
-        _showMarkersTimer = setTimeout(showMarkers, 120);
-      };
 
-      map.on('moveend', () => { if (map.getZoom() >= 12) debouncedShowMarkers(); });
-      map.on('zoomend', () => { map.getZoom() >= 12 ? debouncedShowMarkers() : hideMarkers(); });
+      // zoomend and moveend both fire on a zoom gesture within ~10ms of each other.
+      // Using one shared 60ms debounce means the second event resets the first,
+      // so showMarkers was running ~130-200ms late. Split them: zoomend runs
+      // immediately (it signals intent), moveend debounces panning updates only.
+      map.on('zoomend', () => {
+        clearTimeout(_showMarkersTimer);
+        const zoom = map.getZoom();
+        if (zoom < 12) { hideMarkers(); return; }
+        fetchViewportCustomers();
+        _showMarkersTimer = setTimeout(showMarkers, 50);
+      });
+
+      map.on('moveend', () => {
+        if (map.getZoom() < 12) return;
+        clearTimeout(_showMarkersTimer);
+        fetchViewportCustomers();
+        _showMarkersTimer = setTimeout(showMarkers, 80);
+      });
 
       map.on('click', (e) => {
         const interactiveLayers = ['unclustered-main-devices', 'unclustered-devices'];
@@ -924,39 +1079,33 @@ export default function NetworkMap() {
         clearUpstreamPath();
         if (map.getZoom() >= 12) { showMarkers(); } 
         else { hideMarkers(); }
+        refreshFilters();
       });
 
-    });   
-    
-    const handleSearch = (e) => {
-      if (e.key !== 'Enter') return;
-      const q = e.target.value.trim().toLowerCase();
-      if (!q) return;
-      const match = Object.values(devMapRef.current).find(d =>
-        d.name?.toLowerCase().includes(q) || String(d.id).toLowerCase().includes(q)
-      );
-      if (!match) return;
-      const map = mapInstanceRef.current;
-      map.flyTo({ center: [match.lng, match.lat], zoom: 15, duration: 900 });
-      map.once('moveend', () => {
-        focusedDeviceIdRef.current = String(match.id);
-        showMarkersRef.current?.();
-      });
-      if (searchRef.current) searchRef.current.blur();
-    };
-
-    searchRef.current?.addEventListener('keydown', handleSearch);
-    
-    return () => {
-      searchRef.current?.removeEventListener('keydown', handleSearch);
-      if (liveRouteUpdateTimeout.current) clearTimeout(liveRouteUpdateTimeout.current);
-      if (mapInstanceRef.current) {
-         mapInstanceRef.current.remove();
-         mapInstanceRef.current = null;
-      }
-      maplibregl.removeProtocol('pmtiles'); 
+    } catch (err) {
+      console.error('🔴 Map load failed at:', err);
     }
-  }, []);
+  });
+  return () => {
+    isMounted = false;
+    
+    if (liveRouteUpdateTimeout.current) {
+      clearTimeout(liveRouteUpdateTimeout.current);
+    }
+
+    // Safely remove HTML markers from DOM
+    for (const marker of activeMarkersRef.current.values()) {
+      marker.remove();
+    }
+    activeMarkersRef.current.clear();
+
+    // Destroy MapLibre context
+    if (mapInstanceRef.current) {
+      mapInstanceRef.current.remove();
+      mapInstanceRef.current = null;
+    }
+  };
+}, []);
 
   return (
     <div className='relative'>
