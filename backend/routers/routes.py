@@ -15,6 +15,25 @@ router = APIRouter()
 
 FIXTURES_DIR = os.path.join(os.path.dirname(__file__), '..', 'fixtures')
 
+_devices_cache = None
+_links_cache = None
+
+def _load_devices():
+    global _devices_cache
+    if _devices_cache is None:
+        with open(os.path.join(FIXTURES_DIR, 'devices.json')) as f:
+            _devices_cache = json.load(f)
+    return _devices_cache
+
+def _load_links():
+    global _links_cache
+    if _links_cache is None:
+        with open(os.path.join(FIXTURES_DIR, 'links.json')) as f:
+            _links_cache = json.load(f)
+    return _links_cache
+
+INFRA_TYPES = {'core-router', 'edge-router', 'olt', 'server', 'switch', 'router'}
+
 @router.get('/devices')
 def get_devices():
     with open(os.path.join(FIXTURES_DIR, 'devices.json')) as f:
@@ -24,6 +43,38 @@ def get_devices():
 def get_links():
     with open(os.path.join(FIXTURES_DIR, 'links.json')) as f:
         return json.load(f)
+    
+
+@router.get('/devices/infra')
+def get_infra_devices():
+    return [d for d in _load_devices() if d.get('type') in INFRA_TYPES]
+
+@router.get('/links/infra')
+def get_infra_links():
+    return [l for l in _load_links()
+            if not str(l['from']).startswith('customer-router')
+            and not str(l['to']).startswith('customer-router')]
+
+@router.get('/devices/viewport')
+def get_devices_viewport(west: float, south: float, east: float, north: float):
+    return [d for d in _load_devices()
+            if d.get('type') == 'customer-router'
+            and west <= d.get('lng', 0) <= east
+            and south <= d.get('lat', 0) <= north]
+
+@router.get('/links/viewport')
+def get_links_viewport(west: float, south: float, east: float, north: float):
+    dev_map = {str(d['id']): d for d in _load_devices()}
+    result = []
+    for l in _load_links():
+        from_id, to_id = str(l['from']), str(l['to'])
+        if not from_id.startswith('customer-router') and not to_id.startswith('customer-router'):
+            continue
+        cust_id = from_id if from_id.startswith('customer-router') else to_id
+        d = dev_map.get(cust_id)
+        if d and west <= d.get('lng', 0) <= east and south <= d.get('lat', 0) <= north:
+            result.append(l)
+    return result
 
 # --- NEW ENDPOINT: Handle dragging and saving device locations ---
 @router.patch('/devices/{device_id}')
@@ -49,7 +100,11 @@ def update_device(device_id: str, request: Point):
         
     # 3. Write the changes back to the JSON file
     with open(devices_path, 'w') as f:
-        json.dump(devices, f, indent=2)
+        json.dump(devices, f, indent=2
+                  )
+    global _devices_cache
+    _devices_cache = None
+
         
     return {"message": "success", "device_id": device_id}
 # -----------------------------------------------------------------
