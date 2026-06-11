@@ -117,6 +117,8 @@ export default function NetworkMap() {
       // or just make them global within the load block since they are accessed by closures later.
       const linkMap = {};
       const ObjectLinksByDevice = {};
+      linkMapRef.current = linkMap;
+      ObjectLinksByDeviceRef.current = ObjectLinksByDevice;
       const fetchedViewportRef = new Set(); // Prevent fetching the same area twice
 
       async function fetchViewportData() {

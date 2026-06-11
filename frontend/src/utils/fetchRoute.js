@@ -1,13 +1,6 @@
 const inFlight = new Map();
 const MAX_RESOLVED = 500;
 const resolved = new Map();
-function cacheSet(key, value) {
-  if (resolved.size >= MAX_RESOLVED) {
-    resolved.delete(resolved.keys().next().value); // evict LRU (insertion order)
-  }
-  resolved.set(key, data);
-
-}
 
 export async function fetchRoute(a, b, extra = {}) {
   const key = `${a.lat},${a.lng},${b.lat},${b.lng}`;
