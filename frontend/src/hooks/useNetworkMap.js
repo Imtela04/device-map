@@ -132,6 +132,9 @@ export function useNetworkMap() {
           // Keep accessDevicesRef in sync — used by showMarkers for viewport filtering
           accessDevicesRef.current = Object.values(devMapRef.current)
             .filter(d => !INFRA.has(d.safeType));
+					mainDevicesRef.current = Object.values(devMapRef.current)
+						.filter(d => INFRA.has(d.safeType));
+
 
           // Populate linkMap + ObjectLinksByDevice so topology traversal works
           viewLinks.forEach(l => {
@@ -145,17 +148,27 @@ export function useNetworkMap() {
           });
 
 
-          updateAllDeviceSources(); // Push new data to MapLibre
+          updateAllDeviceSources();
+					const allDevices = Object.values(devMapRef.current);
+					const online   = allDevices.filter(d => mockStatus(d.id) === 'online').length;
+					const degraded = allDevices.filter(d => mockStatus(d.id) === 'degraded').length;
+					const down     = allDevices.filter(d => mockStatus(d.id) === 'down').length;
+					setStats({ total: allDevices.length, online, degraded, down });
+
           queueLiveRouteUpdate();
-          showMarkers();
+					if (map.getZoom() >= 12) showMarkers();
+
 
         } catch (error) {
           console.error("Viewport fetch failed:", error);
         }
 				}
 				fetchViewportData();
-				map.on('moveend', fetchViewportData);
-				map.on('zoomend', fetchViewportData);
+				let _viewportFetchTimer = null;
+				map.on('moveend', () => {
+					clearTimeout(_viewportFetchTimer);
+					_viewportFetchTimer = setTimeout(fetchViewportData, 150);
+				});
 
 				// ── Device Source Sync ─────────────────────────────────────────────────────
 				const toGeoJSONFeature = (device) => {
@@ -208,7 +221,7 @@ export function useNetworkMap() {
 						const features = [];
 						for (const f of liveRouteMapRef.current.values()) {
 							const tier = f.properties?.tier;
-							if (zoom <  6 && tier !== 'core')                                        continue;
+							if (zoom <  5)                                                           continue;
 							if (zoom <  8 && tier !== 'core' && tier !== 'edge')                     continue;
 							if (zoom < 10 && tier !== 'core' && tier !== 'edge' && tier !== 'olt')   continue;
 							features.push(f);
@@ -733,7 +746,8 @@ export function useNetworkMap() {
 				map.addLayer({
 					id: 'unclustered-main-devices', 
 					type: 'symbol', 
-					source: 'main-devices', 
+					source: 'main-devices',
+					minzoom: 5, 
 					layout: {
 						'icon-image': ['get', 'safeType'],
 						'icon-size': 1.0, 'icon-allow-overlap': true, 'icon-ignore-placement': true,
@@ -743,18 +757,20 @@ export function useNetworkMap() {
 						'text-color': '#1e293b', 'text-halo-color': '#ffffff', 'text-halo-width': 1.5,
 						'icon-opacity': [
 							'step', ['zoom'],
+							0.0,
 							// Zoom < 5: Only Core Routers
-							['case', ['==', ['get', 'safeType'], 'core-router'], 1.0, 0.0],
+							5, ['case', ['==', ['get', 'safeType'], 'core-router'], 1.0, 0.0],
 							// Zoom 5-7: Core + Edge Routers
-							5, ['case', ['==', ['get', 'safeType'], 'core-router'], 1.0, ['==', ['get', 'safeType'], 'edge-router'], 1.0, 0.0],
+							6, ['case', ['==', ['get', 'safeType'], 'core-router'], 1.0, ['==', ['get', 'safeType'], 'edge-router'], 1.0, 0.0],
 							// Zoom 7+: Show all remaining infra (OLTs, etc)
-							7, 1.0
+							8, 1.0
 						],
 						'text-opacity': [
 							'step', ['zoom'],
-							['case', ['==', ['get', 'safeType'], 'core-router'], 1.0, 0.0],
-							5, ['case', ['==', ['get', 'safeType'], 'core-router'], 1.0, ['==', ['get', 'safeType'], 'edge-router'], 1.0, 0.0],
-							7, 1.0
+							0.0,
+							5, ['case', ['==', ['get', 'safeType'], 'core-router'], 1.0, 0.0],
+							6, ['case', ['==', ['get', 'safeType'], 'core-router'], 1.0, ['==', ['get', 'safeType'], 'edge-router'], 1.0, 0.0],
+							8, 1.0
 						]
 					},
 				});
@@ -783,6 +799,64 @@ export function useNetworkMap() {
 					devMap[String(d.id)] = { ...d, safeType: d.type };
 				});
 				mainDevicesRef.current = infraDevices.map(d => ({ ...d, safeType: d.type }));
+				if (infraDevices.length > 0) {
+					const n = infraDevices.length;
+					const cLng = infraDevices.reduce((s, d) => s + d.lng, 0) / n;
+					const cLat = infraDevices.reduce((s, d) => s + d.lat, 0) / n;
+
+					map.addSource('network-dot', {
+							type: 'geojson',
+							data: {
+									type: 'Feature',
+									geometry: { type: 'Point', coordinates: [cLng, cLat] },
+									properties: {}
+							}
+					});
+
+					map.addLayer({
+						id: 'network-dot-pulse',
+						type: 'circle',
+						source: 'network-dot',
+						maxzoom: 5,
+						paint: {
+							'circle-radius':         5,
+							'circle-color':          'transparent',
+							'circle-stroke-width':   2,
+							'circle-stroke-color':   '#4f46e5',
+							'circle-stroke-opacity': 0, 
+						}
+					});
+
+					map.addLayer({
+							id: 'network-dot',
+							type: 'circle',
+							source: 'network-dot',
+							maxzoom: 5,
+							paint: {
+									'circle-radius':          ['interpolate', ['linear'], ['zoom'], 1, 5, 4, 11],
+									'circle-color':           '#4f46e5',
+									'circle-opacity':         0.85,
+									'circle-stroke-width':    2,
+									'circle-stroke-color':    '#ffffff',
+									'circle-stroke-opacity':  0.9,
+							}
+					});
+
+					// Animate the ring — slow, professional pulse
+					let _pulseRaf = null;
+					const PULSE_DURATION = 2200; // ms per cycle
+					function animatePulse(ts) {
+						if (!mapInstanceRef.current?.getLayer('network-dot-pulse')) return;
+						const t   = (ts % PULSE_DURATION) / PULSE_DURATION; // 0 → 1
+						const radius  = 5 + t * 18;                          // 5px → 23px
+						const opacity = 0.6 * (1 - t);                       // fades out as it expands
+						mapInstanceRef.current.setPaintProperty('network-dot-pulse', 'circle-radius',         radius);
+						mapInstanceRef.current.setPaintProperty('network-dot-pulse', 'circle-stroke-opacity', opacity);
+						_pulseRaf = requestAnimationFrame(animatePulse);
+					}
+					_pulseRaf = requestAnimationFrame(animatePulse);
+
+				}
 				infraLinkData.forEach(l => {
 					const lid = String(l.id);
 					linkMap[lid] = l;
@@ -792,6 +866,8 @@ export function useNetworkMap() {
 							ObjectLinksByDevice[devId].push(l);
 					});
 				});
+
+
 				updateAllDeviceSources();
 				const backboneLinks = infraLinkData.filter(l => {
 					const fType = devMap[String(l.from)]?.safeType || '';
@@ -868,12 +944,13 @@ export function useNetworkMap() {
 				// ── Map Event Listeners ────────────────────────────────────────────────────
 				let _showMarkersTimer = null;
 				map.on('zoomend', () => {
-					clearTimeout(_showMarkersTimer);
-					const zoom = map.getZoom();
-					if (zoom < 12) { hideMarkers(); return; }
-					// fetchViewportData is already registered as a moveend/zoomend listener above
-					// for data; this handler is solely responsible for DOM marker visibility.
-					_showMarkersTimer = setTimeout(showMarkers, 50);
+					const currentZoom = map.getZoom();
+					if (currentZoom < 12) {
+						clearTimeout(_showMarkersTimer);
+						hideMarkers();
+						return;
+					}
+					if (currentZoom < 5) queueLiveRouteUpdate();
 				});
 				map.on('moveend', () => {
 					if (map.getZoom() < 12) return;
@@ -907,7 +984,8 @@ export function useNetworkMap() {
 		});
   return () => {
     isMounted = false;
-    
+    if (_pulseRaf) cancelAnimationFrame(_pulseRaf);
+
     if (liveRouteUpdateTimeout.current) {
       clearTimeout(liveRouteUpdateTimeout.current);
     }
@@ -925,5 +1003,5 @@ export function useNetworkMap() {
 }, []);
 
 
-  return { mapRef };
+  return { mapRef, stats,  refreshMarkers: () => showMarkersRef.current?.(),};
 }
