@@ -228,16 +228,45 @@ export default function NetworkMap() {
               if (tDev) toName = tDev.name;
             }
 
-            fromName = fromName || props.from || (actualLink ? actualLink.from : 'Unknown');
-            toName = toName || props.to || (actualLink ? actualLink.to : 'Unknown');
+          fromName = fromName || props.from || (actualLink ? actualLink.from : 'Unknown');
+          toName = toName || props.to || (actualLink ? actualLink.to : 'Unknown');
 
-            popup.setLngLat(e.lngLat).setHTML(
-              `<div style="padding: 4px;">
-                <strong>Link Data</strong><br/>
-                <span style="font-size: 0.9em; color: #555;">From: ${fromName}</span><br/>
-                <span style="font-size: 0.9em; color: #555;">To: ${toName}</span>
-              </div>`
-            ).addTo(map);
+          const tier       = props.tier || 'core';
+          const tierColor  = TIER_COLOR[tier] || '#4f46e5';
+          const tierLabel  = tier[0].toUpperCase() + tier.slice(1);
+          const linkStatus = mockStatus(props.id);
+          const linkColor  = STATUS_COLOR[linkStatus] || '#22c55e';
+
+          popup.setLngLat(e.lngLat).setHTML(`
+            <div style="font-family:system-ui,sans-serif;padding:6px 8px;min-width:210px;">
+              <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px;">
+                <strong style="font-size:13px;color:#1e293b;">Infrastructure Link</strong>
+                <span style="font-size:10px;padding:2px 7px;border-radius:10px;
+                      background:${tierColor}22;color:${tierColor};font-weight:700;text-transform:uppercase;">
+                  ${tierLabel}
+                </span>
+              </div>
+              <div style="font-size:11px;color:#64748b;margin-bottom:8px;display:flex;align-items:center;gap:6px;">
+                <span style="width:7px;height:7px;border-radius:50%;background:${linkColor};flex-shrink:0;"></span>
+                ${linkStatus[0].toUpperCase() + linkStatus.slice(1)}
+                &nbsp;·&nbsp; ${TIER_SPEED[tier] || '100G Backbone'}
+              </div>
+              <div style="border-top:1px solid #f1f5f9;padding-top:6px;display:grid;gap:4px;">
+                <div style="display:flex;justify-content:space-between;font-size:11px;">
+                  <span style="color:#94a3b8;">From</span>
+                  <strong style="color:#1e293b;">${fromName}</strong>
+                </div>
+                <div style="display:flex;justify-content:space-between;font-size:11px;">
+                  <span style="color:#94a3b8;">To</span>
+                  <strong style="color:#1e293b;">${toName}</strong>
+                </div>
+                <div style="display:flex;justify-content:space-between;font-size:11px;">
+                  <span style="color:#94a3b8;">Link ID</span>
+                  <strong style="color:#475569;font-family:monospace;font-size:10px;">#${props.id}</strong>
+                </div>
+              </div>
+            </div>
+          `).addTo(map);
           }
         });
         
@@ -301,6 +330,63 @@ export default function NetworkMap() {
             'line-opacity': 0.9
           }
         });
+        const TIER_SPEED = {
+          core: '100G Backbone', edge: '10G Uplink', olt: '1G Aggregation', access: '1G GPON'
+        };
+
+        map.on('mouseenter', 'customer-route-line', (e) => {
+          map.getCanvas().style.cursor = 'pointer';
+          if (!e.features.length) return;
+          const p = e.features[0].properties;
+
+          const status      = p.status || 'online';
+          const statusColor = p.statusColor || STATUS_COLOR[status] || '#22c55e';
+          const statusLabel = status[0].toUpperCase() + status.slice(1);
+
+          // Resolve which end is the customer and which is the upstream OLT
+          const fromDev     = devMap[String(p.from)];
+          const toDev       = devMap[String(p.to)];
+          const customerDev = INFRA.has(fromDev?.safeType) ? toDev   : fromDev;
+          const upstreamDev = INFRA.has(fromDev?.safeType) ? fromDev : toDev;
+
+          popup.setLngLat(e.lngLat).setHTML(`
+            <div style="font-family:system-ui,sans-serif;padding:6px 8px;min-width:210px;">
+              <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px;">
+                <strong style="font-size:13px;color:#1e293b;">${customerDev?.name || p.toName || 'Customer'}</strong>
+                <span style="display:inline-flex;align-items:center;gap:4px;font-size:11px;font-weight:600;color:${statusColor};">
+                  <span style="width:7px;height:7px;border-radius:50%;background:${statusColor};flex-shrink:0;"></span>
+                  ${statusLabel}
+                </span>
+              </div>
+              <div style="font-size:11px;color:#64748b;margin-bottom:8px;text-transform:uppercase;letter-spacing:0.05em;">
+                Access Link &nbsp;·&nbsp; ${TIER_SPEED['access']}
+              </div>
+              <div style="border-top:1px solid #f1f5f9;padding-top:6px;display:grid;gap:4px;">
+                <div style="display:flex;justify-content:space-between;font-size:11px;">
+                  <span style="color:#94a3b8;">Upstream OLT</span>
+                  <strong style="color:#1e293b;">${upstreamDev?.name || p.fromName || '—'}</strong>
+                </div>
+                <div style="display:flex;justify-content:space-between;font-size:11px;">
+                  <span style="color:#94a3b8;">Link ID</span>
+                  <strong style="color:#475569;font-family:monospace;font-size:10px;">#${p.id}</strong>
+                </div>
+                <div style="display:flex;justify-content:space-between;font-size:11px;">
+                  <span style="color:#94a3b8;">Port Type</span>
+                  <strong style="color:#475569;">${(p.fromType || p.toType || 'fiber').replace(/-/g,' ')}</strong>
+                </div>
+              </div>
+              <div style="margin-top:6px;padding-top:5px;border-top:1px solid #f1f5f9;font-size:10px;color:#94a3b8;text-align:center;">
+                Click device to isolate this connection
+              </div>
+            </div>
+          `).addTo(map);
+        });
+
+        map.on('mouseleave', 'customer-route-line', () => {
+          map.getCanvas().style.cursor = '';
+          popup.remove();
+        });
+
       }
 
       addRouteLayers('live-routes', 'live');
@@ -684,9 +770,14 @@ export default function NetworkMap() {
             type: 'Feature',
             properties: {
               id: lid,
-              from: String(link.from),
-              to:   String(link.to),
-              tier: 'access',
+              from:      String(link.from),
+              to:        String(link.to),
+              fromName:  from.name || 'Unknown',
+              toName:    to.name   || 'Unknown',
+              fromType:  from.safeType || '',
+              toType:    to.safeType   || '',
+              tier:      'access',
+              status:    mockStatus(lid),
               statusColor: STATUS_COLOR[mockStatus(lid)] ?? '#c4b5fd',
             },
             geometry: { type: 'LineString', coordinates }
@@ -703,6 +794,58 @@ export default function NetworkMap() {
         map.getSource('customer-route')?.setData({ type: 'FeatureCollection', features: [] });
         focusedCustomerRouteIdsRef.current.clear();
       }
+
+      function loadViewportCustomerRoutes() {
+        if (focusedDeviceIdRef.current) return; // focused mode takes priority
+        const bounds = map.getBounds();
+        const w = bounds.getWest(), e = bounds.getEast();
+        const s = bounds.getSouth(), n = bounds.getNorth();
+
+        const visibleAccess = accessDevicesRef.current.filter(
+          d => d.lng >= w && d.lng <= e && d.lat >= s && d.lat <= n
+        ).slice(0, 300); // hard cap — keeps setData payload bounded
+
+        const seenLinks = new Set();
+        const features  = [];
+
+        for (const dev of visibleAccess) {
+          for (const link of (ObjectLinksByDevice[String(dev.id)] || [])) {
+            const lid = String(link.id);
+            if (seenLinks.has(lid)) continue;
+            seenLinks.add(lid);
+
+            const from = devMap[String(link.from)];
+            const to   = devMap[String(link.to)];
+            if (!from || !to) continue;
+
+            // Prefer cached OSRM geometry; fall back to straight line
+            const existing     = liveRouteMapRef.current.get(lid);
+            const coordinates  = existing?.geometry.coordinates
+              ?? [[from.lng, from.lat], [to.lng, to.lat]];
+
+            const status = mockStatus(lid);
+            features.push({
+              type: 'Feature',
+              properties: {
+                id: lid,
+                from:     String(link.from),
+                to:       String(link.to),
+                fromName: from.name || 'Unknown',
+                toName:   to.name   || 'Unknown',
+                fromType: from.safeType || '',
+                toType:   to.safeType   || '',
+                tier:     'access',
+                status,
+                statusColor: STATUS_COLOR[status] ?? '#c4b5fd',
+              },
+              geometry: { type: 'LineString', coordinates }
+            });
+          }
+        }
+
+        map.getSource('customer-route')?.setData({ type: 'FeatureCollection', features });
+      }
+
 
       function showMarkers() {
         const bounds = map.getBounds();
@@ -938,6 +1081,10 @@ export default function NetworkMap() {
             }
           })).then(() => refreshFilters());
         }
+        if (!focusedDeviceIdRef.current && map.getZoom() >= 12) {
+          loadViewportCustomerRoutes();
+        }
+
         
       }
 
@@ -1098,7 +1245,10 @@ export default function NetworkMap() {
         clearCustomerRoute();
         focusedDeviceIdRef.current = null;
         clearUpstreamPath();
-        if (map.getZoom() >= 12) { showMarkers(); } 
+        if (map.getZoom() >= 12) { 
+          showMarkers(); 
+          loadViewportCustomerRoutes();
+        } 
         else { hideMarkers(); }
         refreshFilters();
       });
