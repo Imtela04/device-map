@@ -25,6 +25,8 @@ const TIER_COLOR = {
 
 export default function NetworkMap() {
   const mapRef                        = useRef(null);
+  const linkMapRef                    = useRef({});
+  const ObjectLinksByDeviceRef        = useRef({});
   const mapInstanceRef                = useRef(null);
   const activeMarkersRef              = useRef(new Map()); 
   const liveRouteUpdateTimeout        = useRef(null);
@@ -40,8 +42,6 @@ export default function NetworkMap() {
   const [stats, setStats]             = useState({ total: 0, online: 0, degraded: 0, down: 0 });
 
 
-
-  // Helper Set to identify Infrastructure vs Customers
 
   useEffect(() => {
     if (mapInstanceRef.current) return;
@@ -84,213 +84,117 @@ export default function NetworkMap() {
           return ['online','online','online','online','online','online','degraded','degraded','down','down'][n % 10];
         }
 
-        await loadDeviceIcons(map).catch(e => console.error('❌ loadDeviceIcons failed:', e));
+      await loadDeviceIcons(map).catch(e => console.error('❌ loadDeviceIcons failed:', e));
 
-        const [apiDevices, rawLinks, dbRoutes] = await Promise.all([
-          fetch('http://localhost:8000/api/devices/infra').then(r => r.json()).catch(() => []),
-          fetch('http://localhost:8000/api/links/infra').then(r => r.json()).catch(() => []),
-          fetch('http://localhost:8000/api/routes/geojson').then(r => r.json()).catch(() => null)
-        ]);
 
         // 3. Halt execution if component unmounted during the fetch
-        if (!isMounted) return;
+      if (!isMounted) return;
 
-        const toGeoJSONFeature = (device) => {
-          let renderType = 'Access';
-          const t = (device.type || '').toLowerCase();
-          if (t.includes('core')) renderType = 'Core Router';
-          else if (t.includes('edge')) renderType = 'Edge Router';
-          else if (t.includes('olt')) renderType = 'OLT';
+      const devMap = devMapRef.current;
 
-          return {
-            type: 'Feature',
-            geometry: { type: 'Point', coordinates: [device.lng, device.lat] },
-            properties: { 
-              // 4. Safely extract primitive properties ONLY. 
-              // Spreading `...device` crashes the Web Worker if nested objects exist.
-              id: String(device.id), 
-              name: device.name || 'Unknown',
-              type: device.type,
-              safeType: device.safeType,
-              renderType
-            } 
-          };
-        };
-        const links = rawLinks.map(l => ({ ...l, id: `${l.from}-${l.to}` }));
 
-        const devices = apiDevices
-          // 5. Prevent silent coordinate crashes 
-          .filter(d => typeof d.lng === 'number' && typeof d.lat === 'number')
-          .map(d => {
-            const t = (d.type || '').toLowerCase();
-            let safeType = 'access';
-            if (t.includes('core')) safeType = 'core-router';
-            else if (t.includes('edge')) safeType = 'edge-router';
-            else if (t.includes('olt')) safeType = 'olt';
-            else if (t.includes('server')) safeType = 'server';
-            else if (t.includes('switch')) safeType = 'switch';
-            else if (t === 'router') safeType = 'router';
-            return { ...d, safeType }; 
-          });
+      const toGeoJSONFeature = (device) => {
+        let renderType = 'Access';
+        const t = (device.type || '').toLowerCase();
+        if (t.includes('core')) renderType = 'Core Router';
+        else if (t.includes('edge')) renderType = 'Edge Router';
+        else if (t.includes('olt')) renderType = 'OLT';
 
-      if (dbRoutes?.features?.length) {
-        liveRoutesRef.current.features = dbRoutes.features.map(f => ({
+        return {
           type: 'Feature',
-          properties: {
-            id: String(f.properties.id),
-            type: f.properties.type || 'generic',
-            from: String(f.properties.from),
-            to: String(f.properties.to),
-            fromName: f.properties.fromName,
-            toName: f.properties.toName,
-          },
-          geometry: f.geometry,
-        }));
-        dbRoutes.features.forEach(f => {
-          const id = String(f.properties.id);
-          fetchedRouteIdsRef.current.add(id);
-          modifiedRouteIdsRef.current.add(id); 
-        });
-      }
+          geometry: { type: 'Point', coordinates: [device.lng, device.lat] },
+          properties: { 
+            id: String(device.id), 
+            name: device.name || 'Unknown',
+            type: device.type,
+            safeType: device.safeType,
+            renderType
+          } 
+        };
+      };
 
-      liveRoutesRef.current.features.forEach(f =>
-        liveRouteMapRef.current.set(String(f.properties.id), f)
-      );
-
-
+      // Initialize global maps as empty properties attached to refs,
+      // or just make them global within the load block since they are accessed by closures later.
       const linkMap = {};
       const ObjectLinksByDevice = {};
-      const devMap = {};
-      
-      devices.forEach(d => {
-        devMap[String(d.id)] = d;
-      });      
-      devMapRef.current = devMap; 
+      const fetchedViewportRef = new Set(); // Prevent fetching the same area twice
 
-      links.forEach(l => {
-        linkMap[String(l.id)] = l;
-        const fromId = String(l.from);
-        const toId = String(l.to);
-        if (!ObjectLinksByDevice[fromId]) ObjectLinksByDevice[fromId] = [];
-        if (!ObjectLinksByDevice[toId]) ObjectLinksByDevice[toId] = [];
-        ObjectLinksByDevice[fromId].push(l);
-        ObjectLinksByDevice[toId].push(l);
-      });
-
-      const fetchedViewportRef = new Set();
-
-      async function fetchViewportCustomers() {
+      async function fetchViewportData() {
         const bounds = map.getBounds();
-        // Grid cell key — coarse enough to avoid refetch on tiny pans (~25km cells)
-        const G = 0.25;
+        const zoom = map.getZoom();
+
+        // 1. Determine Tier based on Zoom Level
+        let maxTier = 'core'; 
+        if (zoom >= 6 && zoom < 10) maxTier = 'olt';    // Regional: Core + Edge + OLT
+        if (zoom >= 10) maxTier = 'access';             // District: Everything
+
+        // 2. Create a grid key that INCLUDES the tier, so zooming in forces a refetch
+        const G = zoom >= 10 ? 0.05 : 0.25; 
         const key = [
           Math.floor(bounds.getWest()  / G),
           Math.floor(bounds.getSouth() / G),
           Math.ceil(bounds.getEast()   / G),
           Math.ceil(bounds.getNorth()  / G),
+          maxTier
         ].join(',');
+
         if (fetchedViewportRef.has(key)) return;
         fetchedViewportRef.add(key);
 
-        const { _sw: sw, _ne: ne } = bounds;
-        const q = `west=${bounds.getWest()}&south=${bounds.getSouth()}&east=${bounds.getEast()}&north=${bounds.getNorth()}`;
+        const q = `west=${bounds.getWest()}&south=${bounds.getSouth()}&east=${bounds.getEast()}&north=${bounds.getNorth()}&tier=${maxTier}`;
 
-        const [viewDevices, viewLinks] = await Promise.all([
-          fetch(`http://localhost:8000/api/devices/viewport?${q}`).then(r => r.json()).catch(() => []),
-          fetch(`http://localhost:8000/api/links/viewport?${q}`).then(r => r.json()).catch(() => []),
-        ]);
+        try {
+          // 3. Fetch ONLY what is in the viewport at the required tier
+          const [viewDevices, viewLinks] = await Promise.all([
+            fetch(`http://localhost:8000/api/devices/viewport?${q}`).then(r => r.ok ? r.json() : []).catch(() => []),
+            fetch(`http://localhost:8000/api/links/viewport?${q}`).then(r => r.ok ? r.json() : []).catch(() => []),
+          ]);
 
-        viewDevices.forEach(d => {
-          const strId = String(d.id);
-          if (!devMapRef.current[strId]) {
-            devMapRef.current[strId] = { ...d, safeType: 'access' };
-            accessDevicesRef.current.push({ ...d, safeType: 'access' });
-          }
-        });
+          // Hydrate devMap with safeType so INFRA.has() checks work throughout
+          viewDevices.forEach(d => {
+            const strId = String(d.id);
+            if (!devMapRef.current[strId]) {
+              devMapRef.current[strId] = { ...d, safeType: d.type };
+            }
+          });
+          // Keep accessDevicesRef in sync — used by showMarkers for viewport filtering
+          accessDevicesRef.current = Object.values(devMapRef.current)
+            .filter(d => !INFRA.has(d.safeType));
 
-        viewLinks.forEach(l => {
-          const lid = `${l.from}-${l.to}`;
-          const fromId = String(l.from), toId = String(l.to);
-          const fromDev = devMapRef.current[fromId], toDev = devMapRef.current[toId];
-
-          if (!ObjectLinksByDevice[fromId]) ObjectLinksByDevice[fromId] = [];
-          if (!ObjectLinksByDevice[toId])   ObjectLinksByDevice[toId]   = [];
-          if (!ObjectLinksByDevice[fromId].find(x => String(x.id) === lid))
-            ObjectLinksByDevice[fromId].push({ ...l, id: lid });
-          if (!ObjectLinksByDevice[toId].find(x => String(x.id) === lid))
-            ObjectLinksByDevice[toId].push({ ...l, id: lid });
-
-          if (fromDev && toDev && !liveRouteMapRef.current.has(lid)) {
-            liveRouteMapRef.current.set(lid, {
-              type: 'Feature',
-              properties: {
-                id: lid, type: l.type || 'generic',
-                from: fromId, to: toId,
-                tier: 'access',
-                tierColor: TIER_COLOR.access,
-                statusColor: STATUS_COLOR[mockStatus(lid)] ?? TIER_COLOR.access,
-              },
-              geometry: { type: 'LineString', coordinates: [[fromDev.lng, fromDev.lat], [toDev.lng, toDev.lat]] }
+          // Populate linkMap + ObjectLinksByDevice so topology traversal works
+          viewLinks.forEach(l => {
+            const lid = String(l.id);
+            linkMap[lid] = l;
+            [String(l.from), String(l.to)].forEach(devId => {
+              if (!ObjectLinksByDevice[devId]) ObjectLinksByDevice[devId] = [];
+              if (!ObjectLinksByDevice[devId].some(x => String(x.id) === lid))
+                ObjectLinksByDevice[devId].push(l);
             });
-          }
-        });
+          });
 
-        queueLiveRouteUpdate();
-        showMarkers();
+
+          updateAllDeviceSources(); // Push new data to MapLibre
+          queueLiveRouteUpdate();
+          showMarkers();
+
+        } catch (error) {
+          console.error("Viewport fetch failed:", error);
+        }
       }
-      // Straight-line placeholders for INFRA-connected links only.
-      // Access (customer→OLT) links are invisible until zoom ≥ 10 and are
-      // loaded lazily per-viewport in showMarkers() to keep setData payloads small.
-      const existingRouteIds = new Set(liveRoutesRef.current.features.map(f => String(f.properties.id)));
 
-      links.forEach(l => {
-        const lid = String(l.id);
-        if (!existingRouteIds.has(lid)) {
-          const fromDev = devMap[String(l.from)];
-          const toDev   = devMap[String(l.to)];
-          const fType   = fromDev?.safeType || '';
-          const tType   = toDev?.safeType   || '';
-          // Guard: skip pure access links (neither end is infra)
-          if (fromDev && toDev && (INFRA.has(fType) || INFRA.has(tType))) {
-            liveRoutesRef.current.features.push({
-              type: 'Feature',
-              properties: { 
-                id: lid, type: l.type || 'generic', 
-                from: String(l.from), to: String(l.to), 
-                fromName: fromDev.name, toName: toDev.name 
-              },
-              geometry: { type: 'LineString', coordinates: [[fromDev.lng, fromDev.lat], [toDev.lng, toDev.lat]] }
-            });
-
-          }
-        }
-      });
-      // ----------------------
-
-      const statuses = links.map(l => mockStatus(l.id));
-      setStats({
-        total: links.length,
-        online:   statuses.filter(s => s === 'online').length,
-        degraded: statuses.filter(s => s === 'degraded').length,
-        down:     statuses.filter(s => s === 'down').length,
-      });
-
-      const accessDevices = [];
-      mainDevicesRef.current = []; 
-      
-      devices.forEach(d => {
-        if (INFRA.has(d.safeType)) {
-          mainDevicesRef.current.push(d);
-        } else {
-          accessDevices.push(d);
-        }
-      });
-      
-      accessDevicesRef.current = accessDevices;
+      // Trigger this immediately on load, and then on map movement
+      fetchViewportData();
+      map.on('moveend', fetchViewportData);
+      map.on('zoomend', fetchViewportData);
 
       map.addSource('main-devices', {
         type: 'geojson',
-        data: { type: 'FeatureCollection', features: mainDevicesRef.current.map(toGeoJSONFeature) }
+        data: { type: 'FeatureCollection', features: [] }
+      });
+
+      map.addSource('devices', {
+        type: 'geojson',
+        data: { type: 'FeatureCollection', features: [] }
       });
 
       const popup = new maplibregl.Popup({ closeButton: false, closeOnClick: false });
@@ -731,8 +635,16 @@ export default function NetworkMap() {
           neighborIds.add(String(focusId));
           // Cap access neighbors — OLTs can have 600+ customer downlinks and
           // creating that many Marker instances in one frame causes severe lag.
-          const infraNeighbors  = devices.filter(d => neighborIds.has(String(d.id)) && INFRA.has(d.safeType));
-          const accessNeighbors = devices.filter(d => neighborIds.has(String(d.id)) && !INFRA.has(d.safeType)).slice(0, 50);
+          const infraNeighbors  = [];
+
+          const accessNeighbors = [];
+          for (const nid of neighborIds) {
+            const d = devMapRef.current[nid];
+            if (!d) continue;
+            if (INFRA.has(d.safeType)) infraNeighbors.push(d);
+            else if (accessNeighbors.length < 50) accessNeighbors.push(d);
+          }
+
           devicesToRender = [...infraNeighbors, ...accessNeighbors];
         } else {
           const w = bounds.getWest(), e = bounds.getEast();
@@ -914,8 +826,9 @@ export default function NetworkMap() {
         const infraLinks = candidates.filter(l => {
           const fType = devMap[String(l.from)]?.safeType || '';
           const tType = devMap[String(l.to)]?.safeType   || '';
-          return INFRA.has(fType) || INFRA.has(tType);
-        }).slice(0, 20);
+          return INFRA.has(fType) && INFRA.has(tType);
+        });
+
 
 
         if (infraLinks.length) {
@@ -960,31 +873,53 @@ export default function NetworkMap() {
       clearUpstreamPath();
       refreshFilters();
 
-      // Fetch backbone routes (core + edge) immediately on load so they're
-      // visible at country zoom, without waiting for the user to zoom to 12+.
-      const backboneLinks = links.filter(l => {
+      // ── STARTUP DATA LOAD ────────────────────────────────────────────────────
+      // Infra (core / edge / olt) is always visible, so fetch it eagerly.
+      // Customer devices are fetched on-demand by the viewport system below.
+      const [infraDevices, infraLinkData] = await Promise.all([
+        fetch('http://localhost:8000/api/devices/infra').then(r => r.ok ? r.json() : []).catch(() => []),
+        fetch('http://localhost:8000/api/links/infra').then(r => r.ok ? r.json() : []).catch(() => []),
+      ]);
+
+      if (!isMounted) return;
+
+      // Populate the shared device + link maps so every downstream closure works
+      infraDevices.forEach(d => {
+        devMap[String(d.id)] = { ...d, safeType: d.type };
+      });
+      mainDevicesRef.current = infraDevices.map(d => ({ ...d, safeType: d.type }));
+
+      infraLinkData.forEach(l => {
+        const lid = String(l.id);
+        linkMap[lid] = l;
+        [String(l.from), String(l.to)].forEach(devId => {
+          if (!ObjectLinksByDevice[devId]) ObjectLinksByDevice[devId] = [];
+          if (!ObjectLinksByDevice[devId].some(x => String(x.id) === lid))
+            ObjectLinksByDevice[devId].push(l);
+        });
+      });
+      updateAllDeviceSources();
+
+      // Straight-line placeholders — visible instantly; OSRM overwrites them below
+      const backboneLinks = infraLinkData.filter(l => {
         const fType = devMap[String(l.from)]?.safeType || '';
         const tType = devMap[String(l.to)]?.safeType   || '';
         return (fType === 'core-router' || tType === 'core-router' ||
                 fType === 'edge-router' || tType === 'edge-router') &&
                !fetchedRouteIdsRef.current.has(String(l.id));
       });
-
       backboneLinks.forEach(l => fetchedRouteIdsRef.current.add(String(l.id)));
-      // ── STRAIGHT-LINE PLACEHOLDERS ──────────────────────────────────────────
-      // Paint all backbone + OLT links as straight lines immediately.
-      // OSRM road-snapped routes will overwrite these as requests resolve.
-      // This makes the full network visible at country zoom the instant data loads.
-      const oltLinks = links.filter(l => {
+
+      const oltInfraLinks = infraLinkData.filter(l => {
         const fType = devMap[String(l.from)]?.safeType || '';
         const tType = devMap[String(l.to)]?.safeType   || '';
         return (fType === 'olt' || tType === 'olt') &&
-              INFRA.has(fType) && INFRA.has(tType) &&
-              !fetchedRouteIdsRef.current.has(String(l.id));
+               INFRA.has(fType) && INFRA.has(tType) &&
+               !fetchedRouteIdsRef.current.has(String(l.id));
       });
-      oltLinks.forEach(l => fetchedRouteIdsRef.current.add(String(l.id)));
+      oltInfraLinks.forEach(l => fetchedRouteIdsRef.current.add(String(l.id)));
 
-      [...backboneLinks, ...oltLinks].forEach(link => {
+      [...backboneLinks, ...oltInfraLinks].forEach(link => {
         const from = devMap[String(link.from)];
         const to   = devMap[String(link.to)];
         if (!from || !to) return;
@@ -1010,8 +945,9 @@ export default function NetworkMap() {
       liveRoutesRef.current.features = Array.from(liveRouteMapRef.current.values());
       map.getSource('live-routes').setData(liveRoutesRef.current);
       refreshFilters();
-      // ────────────────────────────────────────────────────────────────────────
+      // ─────────────────────────────────────────────────────────────────────────
 
+      // Fetch road-snapped routes for backbone links in parallel batches
       const BB_BATCH = 25;
       for (let i = 0; i < backboneLinks.length; i += BB_BATCH) {
         await Promise.all(
@@ -1045,24 +981,21 @@ export default function NetworkMap() {
 
       let _showMarkersTimer = null;
 
-      // zoomend and moveend both fire on a zoom gesture within ~10ms of each other.
-      // Using one shared 60ms debounce means the second event resets the first,
-      // so showMarkers was running ~130-200ms late. Split them: zoomend runs
-      // immediately (it signals intent), moveend debounces panning updates only.
       map.on('zoomend', () => {
         clearTimeout(_showMarkersTimer);
         const zoom = map.getZoom();
         if (zoom < 12) { hideMarkers(); return; }
-        fetchViewportCustomers();
+        // fetchViewportData is already registered as a moveend/zoomend listener above
+        // for data; this handler is solely responsible for DOM marker visibility.
         _showMarkersTimer = setTimeout(showMarkers, 50);
       });
 
       map.on('moveend', () => {
         if (map.getZoom() < 12) return;
         clearTimeout(_showMarkersTimer);
-        fetchViewportCustomers();
         _showMarkersTimer = setTimeout(showMarkers, 80);
       });
+
 
       map.on('click', (e) => {
         const interactiveLayers = ['unclustered-main-devices', 'unclustered-devices'];

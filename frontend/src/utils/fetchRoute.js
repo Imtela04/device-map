@@ -5,7 +5,7 @@ function cacheSet(key, value) {
   if (resolved.size >= MAX_RESOLVED) {
     resolved.delete(resolved.keys().next().value); // evict LRU (insertion order)
   }
-  cacheSet(key, data);
+  resolved.set(key, data);
 
 }
 
