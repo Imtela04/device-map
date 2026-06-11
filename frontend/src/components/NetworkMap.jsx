@@ -32,6 +32,7 @@ export default function NetworkMap() {
   const liveRouteUpdateTimeout        = useRef(null);
   const liveRouteMapRef               = useRef(new Map());
   const modifiedRouteIdsRef           = useRef(new Set());
+  const focusedCustomerRouteIdsRef    = useRef(new Set());
   const liveRoutesRef                 = useRef({ type: 'FeatureCollection', features: [] });
   const focusedDeviceIdRef            = useRef(null);
   const fetchedRouteIdsRef            = useRef(new Set());
@@ -40,7 +41,6 @@ export default function NetworkMap() {
   const showMarkersRef                = useRef(null);  
   const devMapRef                     = useRef({});    
   const [stats, setStats]             = useState({ total: 0, online: 0, degraded: 0, down: 0 });
-
 
 
   useEffect(() => {
@@ -277,12 +277,30 @@ export default function NetworkMap() {
       if (!map.getSource('live-routes')) {
           map.addSource('live-routes', { type: 'geojson', data: liveRoutesRef.current });
       }
-         if (!map.getSource('drag-routes')) {
-          map.addSource('drag-routes', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
-          map.addLayer({
-            id: 'drag-routes-line', type: 'line', source: 'drag-routes',
-            paint: { 'line-color': '#94a3b8', 'line-width': 1.5, 'line-opacity': 0.5 } 
-          });
+
+      if (!map.getSource('drag-routes')) {
+        map.addSource('drag-routes', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
+        map.addLayer({
+          id: 'drag-routes-line', type: 'line', source: 'drag-routes',
+          paint: { 'line-color': '#94a3b8', 'line-width': 1.5, 'line-opacity': 0.5 } 
+        });
+      }
+
+      if (!map.getSource('customer-route')) {
+        map.addSource('customer-route', {
+          type: 'geojson',
+          data: { type: 'FeatureCollection', features: [] }
+        });
+        map.addLayer({
+          id: 'customer-route-line',
+          type: 'line',
+          source: 'customer-route',
+          paint: {
+            'line-color': ['coalesce', ['get', 'statusColor'], '#c4b5fd'],
+            'line-width': 2,
+            'line-opacity': 0.9
+          }
+        });
       }
 
       addRouteLayers('live-routes', 'live');
@@ -351,6 +369,7 @@ export default function NetworkMap() {
         const dev = devMap[String(featureId)];
 
         popup.remove();
+        clearCustomerRoute();
         focusedDeviceIdRef.current = featureId;
 
         map.easeTo({ center: coords, zoom: Math.max(map.getZoom(), 13) });
@@ -624,6 +643,67 @@ export default function NetworkMap() {
         }
       }
 
+      async function fetchFocusedCustomerRoutes(deviceId) {
+        const strId = String(deviceId);
+        const links = ObjectLinksByDevice[strId] || [];
+
+        const features = await Promise.all(links.map(async (link) => {
+          const lid  = String(link.id);
+          const from = devMap[String(link.from)];
+          const to   = devMap[String(link.to)];
+          if (!from || !to) return null;
+
+          focusedCustomerRouteIdsRef.current.add(lid);
+
+          // Re-use an already-fetched geometry if the OLT side was loaded as infra
+          const existing = liveRouteMapRef.current.get(lid);
+          let coordinates;
+          if (existing) {
+            coordinates = existing.geometry.coordinates;
+          } else {
+            try {
+              const res = await fetch('http://localhost:8000/api/route', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  a: { lat: from.lat, lng: from.lng },
+                  b: { lat: to.lat,   lng: to.lng   },
+                  link_id:   `${link.from}-${link.to}`,
+                  link_type: link.type || 'generic'
+                }),
+              });
+              if (!res.ok) throw new Error(res.status);
+              const coords = await res.json();
+              coordinates = coords.map(([lat, lng]) => [lng, lat]);
+            } catch {
+              coordinates = [[from.lng, from.lat], [to.lng, to.lat]];
+            }
+          }
+
+          return {
+            type: 'Feature',
+            properties: {
+              id: lid,
+              from: String(link.from),
+              to:   String(link.to),
+              tier: 'access',
+              statusColor: STATUS_COLOR[mockStatus(lid)] ?? '#c4b5fd',
+            },
+            geometry: { type: 'LineString', coordinates }
+          };
+        }));
+
+        map.getSource('customer-route')?.setData({
+          type: 'FeatureCollection',
+          features: features.filter(Boolean)
+        });
+      }
+
+      function clearCustomerRoute() {
+        map.getSource('customer-route')?.setData({ type: 'FeatureCollection', features: [] });
+        focusedCustomerRouteIdsRef.current.clear();
+      }
+
       function showMarkers() {
         const bounds = map.getBounds();
         const focusId = focusedDeviceIdRef.current;
@@ -700,9 +780,13 @@ export default function NetworkMap() {
 
             marker.getElement().addEventListener('click', (e) => {
               e.stopPropagation();
+              clearCustomerRoute();
               focusedDeviceIdRef.current = String(dev.id);
               showMarkers(); 
               showStatsPopup(dev); 
+              if (!INFRA.has(dev.safeType)) {
+                fetchFocusedCustomerRoutes(String(dev.id));
+              }
             });
 
             marker.on('dragstart', () => {
@@ -860,6 +944,7 @@ export default function NetworkMap() {
       showMarkersRef.current = showMarkers;
 
       function hideMarkers() {
+        clearCustomerRoute();
         for (const marker of activeMarkersRef.current.values()) {
             marker.remove();
         }
@@ -1010,6 +1095,7 @@ export default function NetworkMap() {
 
         if (e.originalEvent.target.tagName.toLowerCase() !== 'canvas') return;
         
+        clearCustomerRoute();
         focusedDeviceIdRef.current = null;
         clearUpstreamPath();
         if (map.getZoom() >= 12) { showMarkers(); } 
