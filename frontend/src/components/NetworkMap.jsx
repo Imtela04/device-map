@@ -200,7 +200,9 @@ export default function NetworkMap() {
       });
 
       const popup = new maplibregl.Popup({ closeButton: false, closeOnClick: false });
-      
+      const TIER_SPEED = {
+          core: '100G Backbone', edge: '10G Uplink', olt: '1G Aggregation', access: '1G GPON'
+      };
       const addRouteLayers = (sourceId, prefix, sourceLayer = null) => {
         const layerId = `${prefix}-generic`;
         const layerConfig = {
@@ -330,9 +332,7 @@ export default function NetworkMap() {
             'line-opacity': 0.9
           }
         });
-        const TIER_SPEED = {
-          core: '100G Backbone', edge: '10G Uplink', olt: '1G Aggregation', access: '1G GPON'
-        };
+        
 
         map.on('mouseenter', 'customer-route-line', (e) => {
           map.getCanvas().style.cursor = 'pointer';
