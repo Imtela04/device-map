@@ -402,10 +402,10 @@ Clicking any device (WebGL icon or DOM marker) enters focus mode:
 | Layer ID | Source | Purpose |
 |---|---|---|
 | `live-generic` | `live-routes` GeoJSON | All infrastructure routes and dragged routes |
-| `live-generic-glow` | `live-routes` GeoJSON | Soft glow behind live routes, status-coloured |
+| `live-routes` GeoJSON | Soft glow behind live routes, status-coloured |
 | `customer-route-line` | `customer-route` GeoJSON | ONU/customer routes (focus mode or viewport) |
 | `drag-routes-line` | `drag-routes` GeoJSON | Temporary straight-line visual during drag gesture |
-| `path-line` + `path-glow` | `path-highlight` GeoJSON | Upstream path highlight on device click |
+| `path-line` | `path-highlight` GeoJSON | Upstream path highlight on device click |
 
 All live route state lives in `liveRouteMapRef` — a `Map<linkId, GeoJSONFeature>`. Updates are flushed to the `live-routes` MapLibre source through a 100ms debounced `queueLiveRouteUpdate()`, which also filters by tier so the payload is proportional to what the current zoom would actually render.
 

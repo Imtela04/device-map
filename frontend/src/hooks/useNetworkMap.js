@@ -6,7 +6,8 @@ import { loadDeviceIcons } from '../utils/iconSprite';
 import { fetchRoute } from '../utils/fetchRoute';
 import { toGeoJSON } from '../utils/toGeoJSON';
 import { INFRA, STATUS_COLOR, DEVICE_LEVEL, TIER, TIER_COLOR, TIER_SPEED } from '../utils/mapConstants';
-import { mockStatus } from '../utils/mockStatus';
+import { mockStatus, getLinkStatus } from '../utils/mockStatus';
+
 import { buildLinkPopupHTML, buildCustomerPopupHTML, buildDevicePopupHTML } from '../utils/popupTemplates';
 import { setupMapLayers } from '../utils/setupMapLayers';
 
@@ -253,7 +254,8 @@ export function useNetworkMap() {
 								from: String(props.from), to: String(props.to),
 								tier,
 								tierColor:   TIER_COLOR[tier],
-								statusColor: STATUS_COLOR[mockStatus(safeId)] ?? TIER_COLOR[tier],
+								statusColor: STATUS_COLOR[getLinkStatus(props.from, props.to)] ?? TIER_COLOR[tier],
+
 							};
 						})(),
 						geometry: { type: 'LineString', coordinates }
@@ -284,44 +286,43 @@ export function useNetworkMap() {
 					return { linkIds, deviceIds };
 				}
 				function showUpstreamPath(deviceId) {
-					const { linkIds } = getUpstreamPath(deviceId);
-					const features = linkIds.map(lid => {
-						const color = STATUS_COLOR[mockStatus(lid)];
-						const existing = liveRouteMapRef.current.get(lid);
-						if (existing) {
-							const safeColor = STATUS_COLOR[mockStatus(lid)] ?? (existing.properties.tierColor || '#4f46e5');
-							return { ...existing, properties: { ...existing.properties, statusColor: safeColor } };
-						}
+				const { linkIds } = getUpstreamPath(deviceId);
+				const features = linkIds.map(lid => {
+					const link = linkMap[lid];
+					if (!link) return null;
 
-						const link = linkMap[lid];
-						if (!link) return null;
-						const from = devMap[String(link.from)], to = devMap[String(link.to)];
-						if (!from || !to) return null;
-						const fType  = devMap[String(link.from)]?.safeType || '';
-						const tType  = devMap[String(link.to)]?.safeType   || '';
+					const linkSt = getLinkStatus(
+					mockStatus(link.from),  // → becomes devMap[link.from]?.status when real
+					mockStatus(link.to)
+					);
 
-						const linkLevel = Math.min(
-							DEVICE_LEVEL[fType] || 1,
-							DEVICE_LEVEL[tType]   || 1
-						);
-						const tier = linkLevel >= 4 ? 'core'
-											: linkLevel === 3 ? 'edge'
-											: linkLevel === 2 ? 'olt'
-											: 'access';
+					const color   = STATUS_COLOR[linkSt];
 
-						const tColor = TIER_COLOR[tier];
-						return {
-							type: 'Feature',
-							properties: {
-								id: lid,
-								tier,
-								tierColor:   tColor,
-								statusColor: STATUS_COLOR[mockStatus(lid)] ?? tColor,
-							},
-							geometry: { type: 'LineString', coordinates: [[from.lng, from.lat], [to.lng, to.lat]] }
-						};
-					}).filter(Boolean);
-					map.getSource('path-highlight')?.setData({ type: 'FeatureCollection', features });
+					const existing = liveRouteMapRef.current.get(lid);
+					if (existing) {
+					const safeColor = color ?? (existing.properties.tierColor || '#4f46e5');
+					return { ...existing, properties: { ...existing.properties, statusColor: safeColor } };
+					}
+
+					const from = devMap[String(link.from)], to = devMap[String(link.to)];
+					if (!from || !to) return null;
+					const fType = from.safeType || '';
+					const tType = to.safeType   || '';
+
+					const linkLevel = Math.min(DEVICE_LEVEL[fType] || 1, DEVICE_LEVEL[tType] || 1);
+					const tier = linkLevel >= 4 ? 'core'
+							: linkLevel === 3 ? 'edge'
+							: linkLevel === 2 ? 'olt'
+							: 'access';
+
+					const tColor = TIER_COLOR[tier];
+					return {
+					type: 'Feature',
+					properties: { id: lid, tier, tierColor: tColor, statusColor: color ?? tColor },
+					geometry: { type: 'LineString', coordinates: [[from.lng, from.lat], [to.lng, to.lat]] }
+					};
+				}).filter(Boolean);
+				map.getSource('path-highlight')?.setData({ type: 'FeatureCollection', features });
 				}
 				function clearUpstreamPath() {
 					map.getSource('path-highlight')?.setData({ type: 'FeatureCollection', features: [] });
@@ -376,8 +377,9 @@ export function useNetworkMap() {
 								fromType:  from.safeType || '',
 								toType:    to.safeType   || '',
 								tier:      'access',
-								status:    mockStatus(lid),
-								statusColor: STATUS_COLOR[mockStatus(lid)] ?? '#c4b5fd',
+								status:      getLinkStatus(link.from, link.to),
+								statusColor: STATUS_COLOR[getLinkStatus(link.from, link.to)] ?? '#c4b5fd',
+
 							},
 							geometry: { type: 'LineString', coordinates }
 						};
@@ -420,7 +422,7 @@ export function useNetworkMap() {
 							const coordinates  = existing?.geometry.coordinates
 								?? [[from.lng, from.lat], [to.lng, to.lat]];
 
-							const status = mockStatus(lid);
+							const status = getLinkStatus(link.from, link.to);
 							features.push({
 								type: 'Feature',
 								properties: {
@@ -483,7 +485,7 @@ export function useNetworkMap() {
 						devicesToRender = [...infraInView, ...accessInView];
 					}        
 
-					['links-generic', 'live-generic', 'live-generic-glow'].forEach(id => {
+					['links-generic', 'live-generic'].forEach(id => {
 						if (map.getLayer(id)) map.setLayoutProperty(id, 'visibility', 'visible');
 					});
 
@@ -752,7 +754,6 @@ export function useNetworkMap() {
 						const focusFilter = ['in', ['to-string', ['get', 'id']], ['literal', connectedLinkIds]];
 
 						if (map.getLayer('live-generic')) map.setFilter('live-generic', focusFilter);
-						if (map.getLayer('live-generic-glow')) map.setFilter('live-generic-glow', focusFilter);
 
 						// Hide the focused device's WebGL dot so the popup HTML marker doesn't look messy
 						if (map.getLayer('unclustered-main-devices')) {
@@ -762,7 +763,6 @@ export function useNetworkMap() {
 						// NO DEVICE FOCUSED: Show ALL routes natively. 
 						// (Our line-opacity zoom steps will naturally hide the customer routes at country-level)
 						if (map.getLayer('live-generic')) map.setFilter('live-generic', null);
-						if (map.getLayer('live-generic-glow')) map.setFilter('live-generic-glow', null);
 
 						// Restore all device dots
 						if (map.getLayer('unclustered-main-devices')) map.setFilter('unclustered-main-devices', null);
@@ -948,7 +948,7 @@ export function useNetworkMap() {
 							fromName: from.name, toName: to.name,
 							isInfra: true, tier,
 							tierColor:   TIER_COLOR[tier],
-							statusColor: STATUS_COLOR[mockStatus(link.id)] ?? TIER_COLOR[tier],
+							statusColor: STATUS_COLOR[getLinkStatus(link.from, link.to)] ?? TIER_COLOR[tier],
 						},
 						geometry: { type: 'LineString', coordinates: [[from.lng, from.lat], [to.lng, to.lat]] }
 					});

@@ -1,6 +1,6 @@
 import maplibregl from 'maplibre-gl';
 import { INFRA, STATUS_COLOR, TIER_COLOR } from './mapConstants';
-import { mockStatus } from './mockStatus';
+import { mockStatus, getLinkStatus } from './mockStatus';
 import { buildLinkPopupHTML, buildCustomerPopupHTML } from './popupTemplates';
 
 /**
@@ -40,7 +40,7 @@ export function setupMapLayers(map, { liveRoutesRef, linkMapRef, devMapRef }) {
       const tier      = props.tier || 'core';
       const tierColor = TIER_COLOR[tier] || '#4f46e5';
       const tierLabel = tier[0].toUpperCase() + tier.slice(1);
-      const linkStatus = mockStatus(props.id);
+      const linkStatus = getLinkStatus(props.from, props.to);
       const linkColor  = STATUS_COLOR[linkStatus] || '#22c55e';
       popup.setLngLat(e.lngLat)
         .setHTML(buildLinkPopupHTML({ fromName, toName, tier, tierColor, tierLabel, linkStatus, linkColor, linkId: props.id }))
@@ -70,20 +70,7 @@ export function setupMapLayers(map, { liveRoutesRef, linkMapRef, devMapRef }) {
     8,  ['case', ['==', ['get', 'tier'], 'core'], 1.0, ['==', ['get', 'tier'], 'edge'], 0.9, ['==', ['get', 'tier'], 'olt'], 0.8, 0.0],
     10, ['case', ['==', ['get', 'tier'], 'core'], 1.0, ['==', ['get', 'tier'], 'edge'], 0.9, ['==', ['get', 'tier'], 'olt'], 0.8, 0.0],
   ]);
-  map.addLayer({
-    id: 'live-generic-glow', type: 'line', source: 'live-routes',
-    paint: {
-      'line-color': ['coalesce', ['get', 'statusColor'], '#22c55e'],
-      'line-width': 12, 'line-blur': 8,
-      'line-opacity': [
-        'step', ['zoom'],
-        ['case', ['==', ['get', 'tier'], 'core'], 0.18, 0.0],
-        6,  ['case', ['==', ['get', 'tier'], 'core'], 0.18, ['==', ['get', 'tier'], 'edge'], 0.18, 0.0],
-        8,  ['case', ['==', ['get', 'tier'], 'core'], 0.18, ['==', ['get', 'tier'], 'edge'], 0.18, ['==', ['get', 'tier'], 'olt'], 0.15, 0.0],
-        10, ['case', ['==', ['get', 'tier'], 'core'], 0.18, ['==', ['get', 'tier'], 'edge'], 0.18, ['==', ['get', 'tier'], 'olt'], 0.15, 0.0],
-      ]
-    }
-  }, 'live-generic');
+
 
   // ── Drag routes ────────────────────────────────────────────────────────────
   map.addSource('drag-routes', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
@@ -124,8 +111,6 @@ export function setupMapLayers(map, { liveRoutesRef, linkMapRef, devMapRef }) {
 
   // ── Path highlight ─────────────────────────────────────────────────────────
   map.addSource('path-highlight', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
-  map.addLayer({ id: 'path-glow', type: 'line', source: 'path-highlight',
-    paint: { 'line-color': '#ffffff', 'line-width': 14, 'line-opacity': 0.18, 'line-blur': 8 } });
   map.addLayer({ id: 'path-line', type: 'line', source: 'path-highlight',
     paint: { 'line-color': ['coalesce', ['get', 'statusColor'], '#4f46e5'], 'line-width': 3.5, 'line-opacity': 1 } });
 
