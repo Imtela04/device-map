@@ -83,7 +83,7 @@ useEffect runs once
       → populates devices source with all 60,000 devices
       → calls hideMarkers() (starting zoom is below threshold)
   → on 'zoomend': showMarkers() if zoom ≥ 12, else hideMarkers()
-  → on 'moveend': showMarkers() if zoom ≥ 12 (re-renders visible viewport)
+  → on 'moveend': debounced 150ms → showMarkers() if zoom ≥ 12 (re-renders visible viewport)
   → cleanup: map.remove() on unmount
 ```
 
@@ -108,7 +108,7 @@ map.on('zoomend', () => {
 });
 ```
 
-`showMarkers()` queries the current viewport bounds, creates DOM markers only for visible devices, hides cluster layers, and attaches drag event handlers. `hideMarkers()` removes DOM markers and restores cluster layers. `map.on('moveend')` re-runs `showMarkers()` when panning at high zoom to load markers for newly visible devices.
+`showMarkers()` queries the current viewport bounds, creates DOM markers only for visible devices, hides cluster layers, and attaches drag event handlers. `hideMarkers()` removes DOM markers and restores cluster layers. `map.on('moveend')` re-runs `showMarkers()` when panning at high zoom to load markers for newly visible devices. `moveend` is debounced at 150ms to prevent marker churn during inertial panning or scroll-zooming. After each `showMarkers()` call, `mainDevicesRef` is updated to reflect the devices now rendered as DOM markers — this keeps marker diffing accurate on subsequent viewport fetches and prevents ghost markers or duplicates on pan.
 
 **Position sync:** When a marker is dragged, `dev.lng` / `dev.lat` are mutated in place (the `devMap` object). On `dragend`, `updateClusterSource()` rebuilds the devices GeoJSON from the updated values, so clusters reflect the new position when zooming back out.
 
@@ -178,6 +178,19 @@ Tailwind classes are avoided on marker elements to prevent conflicts with MapLib
 
 The legend derives unique link types from the `LINKS` array using `reduce`, so adding a new link type to `networkData.js` automatically appears in the legend without any other changes.
 
+### Dashboard Integration Surface
+
+`NetworkMap.jsx` exposes two values for the parent dashboard to consume:
+
+| Value | Type | Description |
+|---|---|---|
+| `stats` | `{ total, online, offline, warning }` | Live device counts for the current viewport, updated after every `showMarkers()` call via `setStats` |
+| `refreshMarkers` | `() => void` | Alias for `showMarkers()`, exposed so the dashboard toolbar can force a marker re-render after a data push or bulk update without reaching into map internals |
+
+`stats` is computed from the devices currently rendered in the viewport — not the full 60,000-device fixture. This makes it a meaningful "what's visible right now" count for the NOC status bar rather than a static total.
+
+`refreshMarkers` is the only imperative handle the dashboard should need. Everything else is driven by map events internally.
+
 ### Why `useRef` not `useState`
 
 MapLibre is imperative — it manages its own DOM. Using `useState` would trigger React re-renders that conflict with MapLibre's internal state. `useRef` provides stable storage that persists across renders without triggering them. Key refs:
@@ -185,6 +198,7 @@ MapLibre is imperative — it manages its own DOM. Using `useState` would trigge
 - `mapRef` — the DOM div MapLibre renders into
 - `mapInstanceRef` — the MapLibre map instance
 - `markersRef` — array of active DOM marker instances
+- `mainDevicesRef` — `{ [id]: device }` map of devices currently rendered as DOM markers; synced after every `showMarkers()` call so that pan-triggered re-renders diff correctly and don't duplicate or orphan markers
 - `modifiedRouteIdsRef` — Set of link IDs owned by the live GeoJSON layer
 - `liveRoutesRef` — current live GeoJSON FeatureCollection (avoids stale closure issues)
 
@@ -259,8 +273,15 @@ fetch_route(a, b):
   miss → GET localhost:5000/route/v1/driving/...
        → parse coords → evict LRU if cache full → store → return coords
   error → return [[a.lat, a.lng], [b.lat, b.lng]]
+        → geometry received → haversine check:
+            straight_line_km = haversine(a, b)
+            if route_length_km > straight_line_km × 2:
+                → discard → return [[a.lat, a.lng], [b.lat, b.lng]]  # straight-line fallback
+            else → return parsed coords
 ```
+**Border-crossing sanity check:** OSRM routes along the shortest road-network path regardless of national boundaries. With a Bangladesh-scoped OSM extract this rarely occurs, but as a defensive layer the backend compares the returned route length against the straight-line (haversine) distance between the two points. Any route exceeding 2× the straight-line distance is rejected and replaced with a direct segment. A legitimate road route in the Bangladesh delta geography will not exceed this ratio; anything that does indicates a cross-border routing artifact.
 
+The 2× threshold is configurable via `OSRM_MAX_DETOUR_RATIO` in the environment. Lower it if false positives occur on known long-detour corridors (e.g. river crossings); raise it cautiously as it weakens the guard.
 ---
 
 ## Authentication
@@ -511,3 +532,9 @@ MapLibre manages its own DOM imperatively. `useState` would cause re-renders tha
 
 **Why `liveRoutesRef` instead of deriving state?**
 The live route FeatureCollection is mutated frequently (every drag frame). Holding it in a ref avoids React re-renders on every mouse move while still allowing `map.getSource('live-routes').setData()` to update the map imperatively.
+
+**Why debounce `moveend` at 150ms and not higher?**
+300ms is perceptibly laggy on fast deliberate pans — markers visibly lag the gesture. 150ms is below the threshold of conscious perception for pan completion while still collapsing rapid successive events (trackpad scroll-zoom, inertial scroll) into one call. The value can be tuned per device class if needed.
+
+**Why a haversine check on OSRM output?**
+The Bangladesh OSM extract eliminates the root cause of cross-border routing. The haversine check is a defensive layer that catches any residual artifacts and is cheap to run (pure arithmetic, no I/O). It also guards against future OSRM data updates introducing unexpected routing behaviour.

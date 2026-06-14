@@ -6,7 +6,7 @@ A network topology dashboard for visualising and managing network devices and li
 
 ## What It Does
 
-Device Maps renders network devices as draggable markers on a MapLibre map, connected by road-routed links. At low zoom, devices render as clustered WebGL points for performance. At high zoom (≥ 12), they switch to draggable DOM markers with Lucide icons. Dragging a device re-routes its connected links via OSRM. The FastAPI backend handles routing requests, caches results, persists dragged routes to SQLite, and serves a JWT-authenticated API.
+Device Maps renders network devices as draggable markers on a MapLibre map, connected by road-routed links. At low zoom, devices render as clustered WebGL points for performance. At high zoom (≥ 12), they switch to draggable DOM markers with Lucide icons. Dragging a device re-routes its connected links via OSRM. The FastAPI backend handles routing requests, caches results, persists dragged routes to SQLite, and serves a JWT-authenticated API. The map exposes a live `stats` object (viewport device counts by status) and a `refreshMarkers()` handle for the parent dashboard to trigger re-renders after external data changes.
 
 ---
 
@@ -283,6 +283,8 @@ Requires both the Vite dev server and FastAPI backend to be running.
 |---|---|---|
 | < 12 | WebGL clustered circles (GeoJSON layer) | Click to expand cluster |
 | ≥ 12 | DOM markers with Lucide icons | Draggable, click tooltip |
+
+> `moveend` at zoom ≥ 12 is debounced at 150ms. Panning rapidly fires multiple `moveend` events; only the final one triggers a marker re-render.
 
 Switching zoom levels syncs device positions — dragging a marker at high zoom updates the low-zoom circle position when zoomed back out.
 
