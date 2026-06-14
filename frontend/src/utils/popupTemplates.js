@@ -1,4 +1,4 @@
-import { TIER_SPEED } from './mapConstants';
+import { INFRA, TIER_SPEED } from './mapConstants';
 
 export function buildLinkPopupHTML({ fromName, toName, tier, tierColor, tierLabel, linkStatus, linkColor, linkId }) {
   return `

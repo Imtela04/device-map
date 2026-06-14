@@ -40,7 +40,7 @@ export function setupMapLayers(map, { liveRoutesRef, linkMapRef, devMapRef }) {
       const tier      = props.tier || 'core';
       const tierColor = TIER_COLOR[tier] || '#4f46e5';
       const tierLabel = tier[0].toUpperCase() + tier.slice(1);
-      const linkStatus = getLinkStatus(props.from, props.to);
+      const linkStatus = getLinkStatus(mockStatus(String(props.from)), mockStatus(String(props.to)));
       const linkColor  = STATUS_COLOR[linkStatus] || '#22c55e';
       popup.setLngLat(e.lngLat)
         .setHTML(buildLinkPopupHTML({ fromName, toName, tier, tierColor, tierLabel, linkStatus, linkColor, linkId: props.id }))

@@ -87,6 +87,9 @@ export function useNetworkMap() {
 				linkMapRef.current = linkMap;
 				ObjectLinksByDeviceRef.current = ObjectLinksByDevice;
 				const fetchedViewportRef = new Set(); // Prevent fetching the same area twice
+				function deviceStatus(id) {
+				return devMap[String(id)]?.status ?? 'online';
+				}
 
 				// ── Layer & Source Setup ───────────────────────────────────────────────────
 				const popup = setupMapLayers(map, { liveRoutesRef, linkMapRef, devMapRef });
@@ -254,7 +257,7 @@ export function useNetworkMap() {
 								from: String(props.from), to: String(props.to),
 								tier,
 								tierColor:   TIER_COLOR[tier],
-								statusColor: STATUS_COLOR[getLinkStatus(props.from, props.to)] ?? TIER_COLOR[tier],
+								statusColor: STATUS_COLOR[getLinkStatus(mockStatus(String(props.from)), mockStatus(String(props.to)))] ?? TIER_COLOR[tier],
 
 							};
 						})(),
@@ -365,6 +368,7 @@ export function useNetworkMap() {
 								coordinates = [[from.lng, from.lat], [to.lng, to.lat]];
 							}
 						}
+						const _lst = getLinkStatus(mockStatus(String(link.from)), mockStatus(String(link.to)));
 
 						return {
 							type: 'Feature',
@@ -377,8 +381,8 @@ export function useNetworkMap() {
 								fromType:  from.safeType || '',
 								toType:    to.safeType   || '',
 								tier:      'access',
-								status:      getLinkStatus(link.from, link.to),
-								statusColor: STATUS_COLOR[getLinkStatus(link.from, link.to)] ?? '#c4b5fd',
+								status:		_lst,
+								statusColor: STATUS_COLOR[_lst] ?? '#c4b5fd',
 
 							},
 							geometry: { type: 'LineString', coordinates }
@@ -422,7 +426,7 @@ export function useNetworkMap() {
 							const coordinates  = existing?.geometry.coordinates
 								?? [[from.lng, from.lat], [to.lng, to.lat]];
 
-							const status = getLinkStatus(link.from, link.to);
+							const status = getLinkStatus(mockStatus(String(link.from)), mockStatus(String(link.to)));
 							features.push({
 								type: 'Feature',
 								properties: {
@@ -948,7 +952,7 @@ export function useNetworkMap() {
 							fromName: from.name, toName: to.name,
 							isInfra: true, tier,
 							tierColor:   TIER_COLOR[tier],
-							statusColor: STATUS_COLOR[getLinkStatus(link.from, link.to)] ?? TIER_COLOR[tier],
+							statusColor: STATUS_COLOR[getLinkStatus(mockStatus(String(link.from)), mockStatus(String(link.to)))] ?? TIER_COLOR[tier],
 						},
 						geometry: { type: 'LineString', coordinates: [[from.lng, from.lat], [to.lng, to.lat]] }
 					});
