@@ -99,6 +99,29 @@ export function setupMapLayers(map, { liveRoutesRef, linkMapRef, devMapRef }) {
     }
   });
 
+  map.on('mouseenter', 'customer-route-line', (e) => {
+    map.getCanvas().style.cursor = 'pointer';
+    if (!e.features.length) return;
+    const p       = e.features[0].properties;
+    const devMap  = devMapRef.current;
+    const fromDev = devMap[String(p.from)];
+    const toDev   = devMap[String(p.to)];
+    // upstream is whichever end is infra
+    const upstreamDev  = INFRA.has(fromDev?.safeType) ? fromDev : toDev;
+    const customerDev  = INFRA.has(fromDev?.safeType) ? toDev   : fromDev;
+    const linkStatus   = p.status || mockStatus(p.id);
+    const statusColor  = STATUS_COLOR[linkStatus] || '#22c55e';
+    const statusLabel  = linkStatus[0].toUpperCase() + linkStatus.slice(1);
+    popup
+      .setLngLat(e.lngLat)
+      .setHTML(buildCustomerPopupHTML({ customerDev, upstreamDev, statusColor, statusLabel, p }))
+      .addTo(map);
+  });
+  map.on('mouseleave', 'customer-route-line', () => {
+    map.getCanvas().style.cursor = '';
+    popup.remove();
+  });
+
   // ── Path highlight ─────────────────────────────────────────────────────────
   map.addSource('path-highlight', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
   map.addLayer({ id: 'path-glow', type: 'line', source: 'path-highlight',

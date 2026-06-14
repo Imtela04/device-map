@@ -491,6 +491,11 @@ export function useNetworkMap() {
 						map.setLayoutProperty('unclustered-main-devices', 'visibility', 'none');
 					}
 
+					if (map.getLayer('unclustered-devices')) {
+						map.setLayoutProperty('unclustered-devices', 'visibility', 'none');
+					}
+
+
 
 					const visibleIds = new Set(devicesToRender.map(d => String(d.id)));
 
@@ -519,32 +524,58 @@ export function useNetworkMap() {
 
 							let _hoverPopup = null;
 							el.addEventListener('mouseenter', () => {
-								if (focusedDeviceIdRef.current) return; // suppress during focused mode
-								const st = mockStatus(dev.id);
-								_hoverPopup = new maplibregl.Popup({
-									offset: 18, closeButton: false, closeOnClick: false,
-									className: 'marker-hover-popup'
-								})
-								.setLngLat(marker.getLngLat())
-								.setHTML(`<div style="font-size:12px;line-height:1.5">
-									<strong style="display:block;margin-bottom:2px">${dev.name || 'Unknown'}</strong>
-									<span style="opacity:.65;font-size:11px">${dev.safeType || dev.type || ''} &middot; ${st}</span>
-								</div>`)
-								.addTo(map);
+							if (focusedDeviceIdRef.current) return;
+							const st = mockStatus(dev.id);
+							const isAccess = !INFRA.has(dev.safeType);
+
+							let upstreamName = '';
+							let upstreamType = '';
+							let linkSt = '';
+							if (isAccess) {
+								const links = ObjectLinksByDevice[String(dev.id)] || [];
+								const upLink = links.find(l => {
+								const otherId = String(l.from) === String(dev.id) ? String(l.to) : String(l.from);
+								return INFRA.has(devMap[otherId]?.safeType);
+								});
+								if (upLink) {
+								const upId = String(upLink.from) === String(dev.id)
+									? String(upLink.to) : String(upLink.from);
+								const upDev = devMap[upId];
+								upstreamName = upDev?.name  || '';
+								upstreamType = upDev?.safeType || '';
+								linkSt       = mockStatus(upLink.id);
+								}
+							}
+
+							_hoverPopup = new maplibregl.Popup({
+								offset: 18, closeButton: false, closeOnClick: false,
+								className: 'marker-hover-popup'
+							})
+							.setLngLat(marker.getLngLat())
+							.setHTML(`<div style="font-size:12px;line-height:1.6">
+								<strong style="display:block;margin-bottom:2px">${dev.name || 'Unknown'}</strong>
+								<span style="opacity:.65;font-size:11px">${dev.safeType || dev.type || ''} &middot; ${st}</span>
+								${upstreamName ? `
+								<div style="border-top:1px solid rgba(0,0,0,.08);margin-top:4px;padding-top:4px">
+								<span style="opacity:.55;font-size:11px">Connected to</span>
+								<span style="display:block;font-size:11px;font-weight:600">${upstreamName}</span>
+								<span style="opacity:.55;font-size:10px">${upstreamType} &middot; link ${linkSt}</span>
+								</div>` : ''}
+							</div>`)
+							.addTo(map);
 							});
 							el.addEventListener('mouseleave', () => { _hoverPopup?.remove(); _hoverPopup = null; });
 
 							marker.getElement().addEventListener('click', (e) => {
-								e.stopPropagation();
-								_hoverPopup?.remove(); _hoverPopup = null; // dismiss hover before full popup opens
-								clearCustomerRoute();
-								focusedDeviceIdRef.current = String(dev.id);
-								showMarkers();
-								showStatsPopup(dev);
-								if (!INFRA.has(dev.safeType)) {
-									fetchFocusedCustomerRoutes(String(dev.id));
-								}
+							e.stopPropagation();
+							_hoverPopup?.remove(); _hoverPopup = null;
+							clearCustomerRoute();
+							focusedDeviceIdRef.current = String(dev.id);
+							showMarkers();
+							if (INFRA.has(dev.safeType)) showStatsPopup(dev);
+							else fetchFocusedCustomerRoutes(String(dev.id));
 							});
+
 
 							marker.on('dragstart', () => {
 								const affected = ObjectLinksByDevice[strId] || [];
@@ -705,7 +736,7 @@ export function useNetworkMap() {
 					activeMarkersRef.current.clear();
 					focusedDeviceIdRef.current = null; 
 
-				['unclustered-main-devices']
+				['unclustered-main-devices', 'unclustered-devices']
 					.forEach(id => { if (map.getLayer(id)) map.setLayoutProperty(id, 'visibility', 'visible'); });
 					if (map.getLayer('unclustered-main-devices')) map.setFilter('unclustered-main-devices', null);
 				}      

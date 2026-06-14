@@ -57,9 +57,6 @@ export function buildCustomerPopupHTML({ customerDev, upstreamDev, statusColor, 
           <strong style="color:#475569;">${(p.fromType || p.toType || 'fiber').replace(/-/g,' ')}</strong>
         </div>
       </div>
-      <div style="margin-top:6px;padding-top:5px;border-top:1px solid #f1f5f9;font-size:10px;color:#94a3b8;text-align:center;">
-        Click device to isolate this connection
-      </div>
     </div>`;
 }
 
@@ -67,7 +64,10 @@ export function buildDevicePopupHTML(dev, connectedLinks, devMap) {
   let statsHtml = '';
 
   if (dev.safeType === 'olt') {
-    const customerCount = Math.max(0, connectedLinks.length - 1);
+    const customerCount = connectedLinks.filter(l => {
+      const otherId = String(l.from) === String(dev.id) ? String(l.to) : String(l.from);
+      return !INFRA.has(devMap[otherId]?.safeType);
+    }).length;
     statsHtml = `
       <div style="display:flex;justify-content:space-between;margin-top:6px;font-size:12px;">
         <span style="color:#64748b;">Downstream ONTs:</span>
@@ -99,16 +99,6 @@ export function buildDevicePopupHTML(dev, connectedLinks, devMap) {
       <div style="display:flex;justify-content:space-between;margin-top:4px;font-size:12px;">
         <span style="color:#64748b;">Path Redundancy:</span>
         <strong style="color:#10b981;">Active / Active</strong>
-      </div>`;
-  } else {
-    statsHtml = `
-      <div style="display:flex;justify-content:space-between;margin-top:6px;font-size:12px;">
-        <span style="color:#64748b;">Connection:</span>
-        <strong style="color:#10b981;">Online</strong>
-      </div>
-      <div style="display:flex;justify-content:space-between;margin-top:4px;font-size:12px;">
-        <span style="color:#64748b;">Plan:</span>
-        <strong style="color:#3b82f6;">1 Gbps Fiber</strong>
       </div>`;
   }
 
