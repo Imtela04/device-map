@@ -98,23 +98,6 @@ export function setupMapLayers(map, { liveRoutesRef, linkMapRef, devMapRef }) {
       'line-width': 2, 'line-opacity': 0.9,
     }
   });
-  map.on('mouseenter', 'customer-route-line', (e) => {
-    map.getCanvas().style.cursor = 'pointer';
-    if (!e.features.length) return;
-    const p          = e.features[0].properties;
-    const devMap     = devMapRef.current;
-    const status     = p.status || 'online';
-    const statusColor = p.statusColor || STATUS_COLOR[status] || '#22c55e';
-    const statusLabel = status[0].toUpperCase() + status.slice(1);
-    const fromDev    = devMap[String(p.from)];
-    const toDev      = devMap[String(p.to)];
-    const customerDev = INFRA.has(fromDev?.safeType) ? toDev   : fromDev;
-    const upstreamDev = INFRA.has(fromDev?.safeType) ? fromDev : toDev;
-    popup.setLngLat(e.lngLat)
-      .setHTML(buildCustomerPopupHTML({ customerDev, upstreamDev, statusColor, statusLabel, p }))
-      .addTo(map);
-  });
-  map.on('mouseleave', 'customer-route-line', () => { map.getCanvas().style.cursor = ''; popup.remove(); });
 
   // ── Path highlight ─────────────────────────────────────────────────────────
   map.addSource('path-highlight', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });

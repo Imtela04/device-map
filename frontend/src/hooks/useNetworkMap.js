@@ -517,12 +517,30 @@ export function useNetworkMap() {
 							marker.addTo(map);
 							activeMarkersRef.current.set(strId, marker);
 
+							let _hoverPopup = null;
+							el.addEventListener('mouseenter', () => {
+								if (focusedDeviceIdRef.current) return; // suppress during focused mode
+								const st = mockStatus(dev.id);
+								_hoverPopup = new maplibregl.Popup({
+									offset: 18, closeButton: false, closeOnClick: false,
+									className: 'marker-hover-popup'
+								})
+								.setLngLat(marker.getLngLat())
+								.setHTML(`<div style="font-size:12px;line-height:1.5">
+									<strong style="display:block;margin-bottom:2px">${dev.name || 'Unknown'}</strong>
+									<span style="opacity:.65;font-size:11px">${dev.safeType || dev.type || ''} &middot; ${st}</span>
+								</div>`)
+								.addTo(map);
+							});
+							el.addEventListener('mouseleave', () => { _hoverPopup?.remove(); _hoverPopup = null; });
+
 							marker.getElement().addEventListener('click', (e) => {
 								e.stopPropagation();
+								_hoverPopup?.remove(); _hoverPopup = null; // dismiss hover before full popup opens
 								clearCustomerRoute();
 								focusedDeviceIdRef.current = String(dev.id);
-								showMarkers(); 
-								showStatsPopup(dev); 
+								showMarkers();
+								showStatsPopup(dev);
 								if (!INFRA.has(dev.safeType)) {
 									fetchFocusedCustomerRoutes(String(dev.id));
 								}
@@ -677,10 +695,6 @@ export function useNetworkMap() {
 							}
 						})).then(() => refreshFilters());
 					}
-					if (!focusedDeviceIdRef.current && map.getZoom() >= 12) {
-						loadViewportCustomerRoutes();
-					}
-
 					
 				}
 				function hideMarkers() {
@@ -973,7 +987,6 @@ export function useNetworkMap() {
 					clearUpstreamPath();
 					if (map.getZoom() >= 12) { 
 						showMarkers(); 
-						loadViewportCustomerRoutes();
 					} 
 					else { hideMarkers(); }
 					refreshFilters();
